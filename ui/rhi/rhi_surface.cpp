@@ -54,6 +54,7 @@ private:
 	[[nodiscard]] Rhi::Renderer *rhiRenderer() const;
 
 	const std::unique_ptr<Renderer> _renderer;
+	QSize _renderedSize;
 
 };
 
@@ -82,11 +83,30 @@ void SurfaceRhi::initialize(QRhiCommandBuffer *cb) {
 }
 
 void SurfaceRhi::render(QRhiCommandBuffer *cb) {
+	const auto rt = renderTarget();
 	if (!updatesEnabled() || size().isEmpty()) {
+		// The color texture is composited into the window even when the
+		// pass is skipped. A freshly (re)created texture holds undefined
+		// GPU memory that would flash as garbage rectangles - clear it
+		// with the renderer's background until real content is drawn.
+		if (rt && _renderedSize != rt->pixelSize()) {
+			auto color = QColor(0, 0, 0, 0);
+			if (const auto r = rhiRenderer()) {
+				const auto c = r->rhiClearColor();
+				color = QColor::fromRgbF(
+					c.redF() * c.alphaF(),
+					c.greenF() * c.alphaF(),
+					c.blueF() * c.alphaF(),
+					c.alphaF());
+			}
+			cb->beginPass(rt, color, { 1.0f, 0 });
+			cb->endPass();
+		}
 		return;
 	}
 	if (const auto r = rhiRenderer()) {
-		r->render(rhi(), renderTarget(), cb);
+		_renderedSize = rt ? rt->pixelSize() : QSize();
+		r->render(rhi(), rt, cb);
 	}
 }
 

@@ -20,9 +20,14 @@ class QPainter;
 namespace Ui::CustomEmoji {
 namespace {
 
-constexpr auto kMaxFrames = 180;
-constexpr auto kCacheVersion = 1;
+// Custom emoji are limited to 3 seconds, which at full 60 fps is up to
+// 180 frames, plus a little slack for rounding in the generators.
+constexpr auto kMaxFrames = 360;
+constexpr auto kCacheVersion = 2;
 constexpr auto kPreloadFrames = 3;
+// Late repaints advance the animation by several frames at once (instead
+// of slowing it down), but never jump too far in a single paint.
+constexpr auto kMaxFrameSkip = 5;
 
 struct CacheHeader {
 	int version = 0;
@@ -174,7 +179,8 @@ std::optional<Cache> Cache::FromSerialized(
 	auto header = CacheHeader();
 	memcpy(&header, serialized.data(), sizeof(header));
 	const auto size = header.size;
-	if (size != requestedSize
+	if (header.version != kCacheVersion
+		|| size != requestedSize
 		|| header.frames <= 0
 		|| header.frames >= kMaxFrames
 		|| header.length <= 0
@@ -383,16 +389,28 @@ PaintFrameResult Cache::paintCurrentFrame(
 	auto last = context.internal.forceLastFrame;
 	if (!first && !last) {
 		const auto now = context.paused ? 0 : context.now;
-		const auto finishes = now ? currentFrameFinishes() : 0;
+		auto finishes = now ? currentFrameFinishes() : 0;
 		if (finishes && now >= finishes) {
-			++_frame;
-			if (_finished && _frame == _frames) {
-				_frame = 0;
-				if (context.internal.overrideFirstWithLastFrame) {
-					last = true;
+			// Advance keeping the animation phase. If the repaint came
+			// late, skip a few frames to catch up instead of slowing
+			// the animation down, then resync if still too far behind.
+			auto skipped = 0;
+			do {
+				++_frame;
+				if (_finished && _frame == _frames) {
+					_frame = 0;
+					if (context.internal.overrideFirstWithLastFrame) {
+						last = true;
+					}
 				}
+				_shown = finishes;
+				finishes = currentFrameFinishes();
+			} while (finishes
+				&& (now >= finishes)
+				&& (++skipped < kMaxFrameSkip));
+			if (finishes && now >= finishes) {
+				_shown = now;
 			}
-			_shown = now;
 		} else if (!_shown) {
 			_shown = now;
 		}
@@ -498,7 +516,9 @@ void Renderer::frameReady(
 	}
 	if (const auto count = generator->count()) {
 		if (!_cache.frames()) {
-			_cache.reserve(std::max(count, kMaxFrames));
+			// Reserve for the actual frame count (Cache::add grows on
+			// demand anyway), not for the theoretical maximum.
+			_cache.reserve(std::min(count, kMaxFrames));
 		}
 	}
 	const auto current = _cache.currentFrame();

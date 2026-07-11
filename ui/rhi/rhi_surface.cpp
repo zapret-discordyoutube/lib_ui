@@ -16,6 +16,7 @@
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
 #include <QRhiWidget>
 #include <QBackingStore>
+#include <rhi/qrhi.h>
 #include <QtGui/QWindow>
 #include <qpa/qplatformbackingstore.h>
 #endif // Qt >= 6.7

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "ui/text/text_custom_emoji.h"
+#include "ui/effects/frame_generator.h"
 #include "base/weak_ptr.h"
 #include "base/bytes.h"
 #include "base/timer.h"
@@ -167,6 +168,9 @@ private:
 		std::unique_ptr<Ui::FrameGenerator> generator,
 		crl::time duration,
 		QImage frame);
+	void framesReady(
+		std::unique_ptr<Ui::FrameGenerator> generator,
+		std::vector<Ui::FrameGenerator::Frame> frames);
 	void renderNext(
 		std::unique_ptr<Ui::FrameGenerator> generator,
 		QImage storage);

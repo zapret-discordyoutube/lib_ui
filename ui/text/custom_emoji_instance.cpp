@@ -28,6 +28,10 @@ constexpr auto kPreloadFrames = 3;
 // Late repaints advance the animation by several frames at once (instead
 // of slowing it down), but never jump too far in a single paint.
 constexpr auto kMaxFrameSkip = 5;
+// Rasterize a few frames per one background hop: one main thread
+// callback per frame for dozens of caching emoji at 60 fps was a
+// callback / repaint storm freezing the UI.
+constexpr auto kFramesPerHop = 4;
 
 struct CacheHeader {
 	int version = 0;
@@ -377,6 +381,11 @@ void Cache::finish() {
 			dst += dstPerLine;
 		}
 	}
+	// The per-row images were copied into _full and are never used
+	// again ('frame()' reads _full once _finished) - free the duplicate,
+	// it is as large as the spritesheet itself.
+	_images.clear();
+	_images.shrink_to_fit();
 }
 
 PaintFrameResult Cache::paintCurrentFrame(
@@ -514,11 +523,13 @@ void Renderer::frameReady(
 		finish();
 		return;
 	}
-	if (const auto count = generator->count()) {
-		if (!_cache.frames()) {
-			// Reserve for the actual frame count (Cache::add grows on
-			// demand anyway), not for the theoretical maximum.
-			_cache.reserve(std::min(count, kMaxFrames));
+	if (generator) {
+		if (const auto count = generator->count()) {
+			if (!_cache.frames()) {
+				// Reserve for the actual frame count (Cache::add grows
+				// on demand anyway), not for the theoretical maximum.
+				_cache.reserve(std::min(count, kMaxFrames));
+			}
 		}
 	}
 	const auto current = _cache.currentFrame();
@@ -530,11 +541,37 @@ void Renderer::frameReady(
 	}
 	if (!duration || total + 1 >= kMaxFrames) {
 		finish();
+	} else if (!generator) {
+		// Middle frame of a rendered batch, the generator arrives
+		// with the last frame of the batch.
 	} else if (current + kPreloadFrames > total) {
 		renderNext(std::move(generator), std::move(frame));
 	} else {
 		_generator = std::move(generator);
 		_storage = std::move(frame);
+	}
+}
+
+void Renderer::framesReady(
+		std::unique_ptr<Ui::FrameGenerator> generator,
+		std::vector<Ui::FrameGenerator::Frame> frames) {
+	Expects(!frames.empty());
+
+	if (const auto total = generator ? generator->count() : 0) {
+		if (!_cache.frames()) {
+			_cache.reserve(std::min(total, kMaxFrames));
+		}
+	}
+	const auto count = int(frames.size());
+	for (auto i = 0; i != count; ++i) {
+		auto &frame = frames[i];
+		frameReady(
+			(i + 1 == count) ? std::move(generator) : nullptr,
+			frame.duration,
+			std::move(frame.image));
+		if (_finished) {
+			return;
+		}
 	}
 }
 
@@ -548,19 +585,26 @@ void Renderer::renderNext(
 		storage = std::move(storage),
 		generator = std::move(generator)
 	]() mutable {
-		auto rendered = generator->renderNext(
-			std::move(storage),
-			QSize(size, size),
-			Qt::KeepAspectRatio);
+		auto frames = std::vector<Ui::FrameGenerator::Frame>();
+		frames.reserve(kFramesPerHop);
+		for (auto i = 0; i != kFramesPerHop; ++i) {
+			auto rendered = generator->renderNext(
+				(i == 0) ? std::move(storage) : QImage(),
+				QSize(size, size),
+				Qt::KeepAspectRatio);
+			const auto stop = rendered.image.isNull()
+				|| !rendered.duration;
+			frames.push_back(std::move(rendered));
+			if (stop) {
+				break;
+			}
+		}
 		crl::on_main(guard, [
 			=,
-			frame = std::move(rendered),
+			frames = std::move(frames),
 			generator = std::move(generator)
 		]() mutable {
-			frameReady(
-				std::move(generator),
-				frame.duration,
-				std::move(frame.image));
+			framesReady(std::move(generator), std::move(frames));
 		});
 	});
 }
@@ -569,7 +613,21 @@ void Renderer::finish() {
 	_finished = true;
 	_cache.finish();
 	if (_put) {
-		_put(_cache.serialize());
+		// LZ4-compressing several MiB of frames on the main thread
+		// caused visible freezes when many emoji finished rendering
+		// together - serialize in the background and hop back to put.
+		// The QImage inside the copy is implicitly shared (cheap) and
+		// both sides only read it.
+		const auto guard = base::make_weak(this);
+		crl::async([cache = _cache, guard, put = _put]() mutable {
+			auto serialized = cache.serialize();
+			crl::on_main(guard, [
+				put = std::move(put),
+				serialized = std::move(serialized)
+			]() mutable {
+				put(std::move(serialized));
+			});
+		});
 	}
 }
 

@@ -18,6 +18,8 @@
 #include <QBackingStore>
 #include <rhi/qrhi.h>
 #include <QtGui/QWindow>
+#include <QtGui/QResizeEvent>
+#include <QtCore/QCoreApplication>
 #include <qpa/qplatformbackingstore.h>
 #endif // Qt >= 6.7
 
@@ -50,6 +52,7 @@ protected:
 	void initialize(QRhiCommandBuffer *cb) override;
 	void render(QRhiCommandBuffer *cb) override;
 	void releaseResources() override;
+	void paintEvent(QPaintEvent *e) override;
 
 private:
 	[[nodiscard]] Rhi::Renderer *rhiRenderer() const;
@@ -109,6 +112,20 @@ void SurfaceRhi::render(QRhiCommandBuffer *cb) {
 		_renderedSize = rt ? rt->pixelSize() : QSize();
 		r->render(rhi(), rt, cb);
 	}
+}
+
+void SurfaceRhi::paintEvent(QPaintEvent *e) {
+	// Mirror SurfaceOpenGL::paintEvent (gl_surface.cpp): when only the
+	// device pixel ratio changes (moving to a screen with a different
+	// scale factor) no QEvent::Resize is delivered, the window swapchain
+	// grows while the composited quads keep the stale device size and a
+	// transparent band is left at the window edge. Force a resize cycle
+	// so the texture and the compositor geometry are rebuilt.
+	const auto device = size() * devicePixelRatio();
+	if (!_renderedSize.isEmpty() && _renderedSize != device) {
+		QCoreApplication::postEvent(this, new QResizeEvent(size(), size()));
+	}
+	RpWidgetBase::paintEvent(e);
 }
 
 void SurfaceRhi::releaseResources() {

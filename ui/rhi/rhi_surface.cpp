@@ -53,12 +53,15 @@ protected:
 	void render(QRhiCommandBuffer *cb) override;
 	void releaseResources() override;
 	void paintEvent(QPaintEvent *e) override;
+	void resizeEvent(QResizeEvent *e) override;
+	bool eventHook(QEvent *e) override;
 
 private:
 	[[nodiscard]] Rhi::Renderer *rhiRenderer() const;
 
 	const std::unique_ptr<Renderer> _renderer;
 	QSize _renderedSize;
+	QSize _deviceSize;
 
 };
 
@@ -121,11 +124,30 @@ void SurfaceRhi::paintEvent(QPaintEvent *e) {
 	// grows while the composited quads keep the stale device size and a
 	// transparent band is left at the window edge. Force a resize cycle
 	// so the texture and the compositor geometry are rebuilt.
+	//
+	// _deviceSize is anchored in resizeEvent / ScreenChangeInternal,
+	// exactly like SurfaceOpenGL's, so one synthetic resize always
+	// resynchronizes it. Comparing against the last rendered target
+	// size instead fired after every ordinary resize and kept reposting
+	// synthetic resizes whenever a render was skipped.
 	const auto device = size() * devicePixelRatio();
-	if (!_renderedSize.isEmpty() && _renderedSize != device) {
+	if (!_deviceSize.isEmpty() && _deviceSize != device) {
 		QCoreApplication::postEvent(this, new QResizeEvent(size(), size()));
 	}
 	RpWidgetBase::paintEvent(e);
+}
+
+void SurfaceRhi::resizeEvent(QResizeEvent *e) {
+	_deviceSize = size() * devicePixelRatio();
+	RpWidgetBase::resizeEvent(e);
+}
+
+bool SurfaceRhi::eventHook(QEvent *e) {
+	const auto result = RpWidgetBase::eventHook(e);
+	if (e->type() == QEvent::ScreenChangeInternal) {
+		_deviceSize = size() * devicePixelRatio();
+	}
+	return result;
 }
 
 void SurfaceRhi::releaseResources() {

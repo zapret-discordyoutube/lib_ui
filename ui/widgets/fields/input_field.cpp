@@ -1072,7 +1072,7 @@ QString AccumulateText(Iterator begin, Iterator end) {
 QTextImageFormat PrepareEmojiFormat(EmojiPtr emoji, int emojiHeight) {
 	const auto factor = style::DevicePixelRatio();
 	const auto size = std::max(emojiHeight * factor, Emoji::GetSizeNormal());
-	const auto width = size + st::emojiPadding * factor * 2;
+	const auto width = Emoji::GetSizeNormal() + st::emojiPadding * factor * 2;
 	auto result = QTextImageFormat();
 	result.setWidth(width / factor);
 	result.setHeight(size / factor);
@@ -5515,7 +5515,17 @@ QString InputField::selectionMarkdownTagForToggle(const QString &tag) const {
 			|| IsNewline(text[0])
 			|| IsNewline(text[text.size() - 1]);
 	}();
-	return (leftForBlock && rightForBlock) ? kTagPre : kTagCode;
+	const auto singleLine = [&] {
+		for (auto position = from; position != till; ++position) {
+			if (IsNewline(document()->characterAt(position))) {
+				return false;
+			}
+		}
+		return true;
+	};
+	return (leftForBlock && rightForBlock && !singleLine())
+		? kTagPre
+		: kTagCode;
 }
 
 void InputField::toggleCurrentMarkdownTag(const QString &tag) {

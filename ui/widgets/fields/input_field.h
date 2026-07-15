@@ -276,6 +276,7 @@ public:
 		rpl::producer<bool> systemTextReplacesEnabled = {});
 	void setMarkdownReplacesEnabled(bool enabled);
 	void setMarkdownReplacesEnabled(rpl::producer<MarkdownEnabledState> enabled);
+	void setMarkdownInstantReplacesEnabled(rpl::producer<bool> enabled);
 	void setInstantViewEditorTagsEnabled(bool enabled);
 	[[nodiscard]] bool instantViewEditorTagsEnabled() const {
 		return _instantViewEditorTagsEnabled;
@@ -507,7 +508,10 @@ private:
 	void performUndoRedo(bool redo);
 
 	bool processMarkdownReplaces(const QString &appended);
-	//bool processMarkdownReplace(const QString &tag);
+	bool processMarkdownReplace(const QString &tag);
+	bool processInstantViewEditorReplace(
+		const QString &tag,
+		const QString &edge);
 	void addMarkdownActions(not_null<QMenu*> menu, QContextMenuEvent *e);
 	void addMarkdownMenuAction(
 		not_null<QMenu*> menu,
@@ -545,13 +549,11 @@ private:
 		const QString &customEmojiData,
 		std::optional<QString> checkOriginal,
 		bool checkIfInMonospace);
-#if 0
 	bool commitMarkdownReplacement(
 		int from,
 		int till,
 		const QString &tag,
 		const QString &edge = QString());
-#endif
 	TextRange insertWithTags(TextRange range, TextWithTags text);
 	TextRange addMarkdownTag(TextRange range, const QString &tag);
 	void removeMarkdownTag(TextRange range, const QString &tag);
@@ -691,6 +693,7 @@ private:
 
 	InstantReplaces _mutableInstantReplaces;
 	bool _instantReplacesEnabled = true;
+	bool _markdownInstantReplacesEnabled = false;
 
 	struct SystemTextReplaces {
 		struct PendingCheck {

@@ -2191,6 +2191,15 @@ void InputField::setMarkdownReplacesEnabled(
 	}, lifetime());
 }
 
+void InputField::setMarkdownInstantReplacesEnabled(
+		rpl::producer<bool> enabled) {
+	std::move(
+		enabled
+	) | rpl::on_next([=](bool value) {
+		_markdownInstantReplacesEnabled = value;
+	}, lifetime());
+}
+
 void InputField::setInstantViewEditorTagsEnabled(bool enabled) {
 	if (_instantViewEditorTagsEnabled == enabled) {
 		return;
@@ -4793,44 +4802,123 @@ const InstantReplaces &InputField::instantReplaces() const {
 	return _mutableInstantReplaces;
 }
 
-// Disable markdown instant replacement.
 bool InputField::processMarkdownReplaces(const QString &appended) {
-	//if (appended.size() != 1 || !_markdownEnabled) {
-	//	return false;
-	//}
-	//const auto ch = appended[0];
-	//if (ch == '`') {
-	//	return processMarkdownReplace(kTagCode)
-	//		|| processMarkdownReplace(kTagPre);
-	//} else if (ch == '*') {
-	//	return processMarkdownReplace(kTagBold);
-	//} else if (ch == '_') {
-	//	return processMarkdownReplace(kTagItalic);
-	//}
+	if (appended.size() != 1
+		|| !_markdownInstantReplacesEnabled
+		|| _markdownEnabledState.disabled()) {
+		return false;
+	}
+	const auto ch = appended[0];
+	if (ch == '`') {
+		return processMarkdownReplace(kTagCode)
+			|| processMarkdownReplace(kTagPre);
+	} else if (ch == '*') {
+		return processMarkdownReplace(kTagBold);
+	} else if (ch == '_') {
+		return processMarkdownReplace(kTagItalic);
+	} else if (ch == '~') {
+		return processMarkdownReplace(kTagStrikeOut)
+			|| processInstantViewEditorReplace(kTagIvSubscript, u"~"_q);
+	} else if (ch == '|') {
+		return processMarkdownReplace(kTagSpoiler);
+	} else if (ch == '=') {
+		return processInstantViewEditorReplace(kTagIvMarked, u"=="_q);
+	} else if (ch == '^') {
+		return processInstantViewEditorReplace(kTagIvSuperscript, u"^"_q);
+	} else if (ch == '$') {
+		return processInstantViewEditorReplace(kTagIvMath, u"$"_q);
+	}
 	return false;
 }
 
-//bool InputField::processMarkdownReplace(const QString &tag) {
-//	const auto position = textCursor().position();
-//	const auto tagLength = tag.size();
-//	const auto start = [&] {
-//		for (const auto &possible : _lastMarkdownTags) {
-//			const auto end = possible.start + possible.length;
-//			if (possible.start + 2 * tagLength >= position) {
-//				return MarkdownTag();
-//			} else if (end >= position || end + tagLength == position) {
-//				if (possible.tag == tag) {
-//					return possible;
-//				}
-//			}
-//		}
-//		return MarkdownTag();
-//	}();
-//	if (start.tag.isEmpty()) {
-//		return false;
-//	}
-//	return commitMarkdownReplacement(start.start, position, tag, tag);
-//}
+bool InputField::processInstantViewEditorReplace(
+		const QString &tag,
+		const QString &edge) {
+	if (!_instantViewEditorTagsEnabled
+		|| !_markdownEnabledState.enabledForTag(tag)) {
+		return false;
+	}
+	const auto position = textCursor().position();
+	for (const auto &md : _lastMarkdownTags) {
+		if (md.internalStart < position
+			&& md.internalStart + md.internalLength >= position
+			&& (md.tag == kTagCode || IsTagPre(md.tag))) {
+			return false;
+		}
+	}
+	constexpr auto kLookBack = 256;
+	const auto edgeLength = int(edge.size());
+	const auto lowest = std::max(position - kLookBack, 0);
+	const auto doc = document();
+	auto window = QString();
+	window.reserve(position - lowest);
+	for (auto i = lowest; i != position; ++i) {
+		window.append(doc->characterAt(i));
+	}
+	const auto cut = [&] {
+		for (auto i = int(window.size()); i != 0; --i) {
+			if (IsNewline(window[i - 1])) {
+				return i;
+			}
+		}
+		return 0;
+	}();
+	const auto windowStart = lowest + cut;
+	window = window.mid(cut);
+	if (window.size() <= 2 * edgeLength || !window.endsWith(edge)) {
+		return false;
+	}
+	const auto openIndex = int(window.lastIndexOf(
+		edge,
+		int(window.size()) - 2 * edgeLength));
+	if (openIndex < 0
+		|| (openIndex > 0 && window[openIndex - 1] == edge[0])) {
+		return false;
+	}
+	const auto inner = window.mid(
+		openIndex + edgeLength,
+		int(window.size()) - edgeLength - openIndex - edgeLength);
+	if (inner.isEmpty()
+		|| inner.front() == edge[0]
+		|| Text::IsSpace(inner.front())
+		|| Text::IsSpace(inner.back())) {
+		return false;
+	}
+	return commitMarkdownReplacement(
+		windowStart + openIndex,
+		position,
+		tag,
+		edge);
+}
+
+bool InputField::processMarkdownReplace(const QString &tag) {
+	if (!_markdownEnabledState.enabledForTag(tag)) {
+		return false;
+	}
+	const auto position = textCursor().position();
+	const auto tagLength = tag.size();
+	const auto start = [&] {
+		for (const auto &possible : _lastMarkdownTags) {
+			const auto end = possible.internalStart + possible.internalLength;
+			if (possible.internalStart + 2 * tagLength >= position) {
+				return MarkdownTag();
+			} else if (end >= position || end + tagLength == position) {
+				if (possible.tag == tag) {
+					return possible;
+				}
+			}
+		}
+		return MarkdownTag();
+	}();
+	if (start.tag.isEmpty()) {
+		return false;
+	}
+	return commitMarkdownReplacement(
+		start.internalStart,
+		position,
+		tag,
+		tag);
+}
 
 void InputField::processInstantReplaces(const QString &appended) {
 	const auto &replaces = instantReplaces();
@@ -5072,7 +5160,6 @@ void InputField::commitInstantReplacement(
 	cursor.insertText(replacement, format);
 }
 
-#if 0
 bool InputField::commitMarkdownReplacement(
 		int from,
 		int till,
@@ -5184,7 +5271,6 @@ bool InputField::commitMarkdownReplacement(
 
 	return true;
 }
-#endif
 
 auto InputField::addMarkdownTag(TextRange range, const QString &tag)
 -> TextRange {

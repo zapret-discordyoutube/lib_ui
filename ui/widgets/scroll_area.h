@@ -51,11 +51,19 @@ struct ScrollToRequest {
 
 extern const char kOptionQScroller[];
 
-// Tune a QScroller to approximate macOS native momentum + ElasticScroll
-// overscroll. Set ownsOvershoot to true for the raw QScroller overshoot path
-// (ScrollArea); pass false where the consumer re-shapes overshootDistance()
-// itself (ElasticScroll), so its own rubber-band feel is left intact.
-void SetupScrollerPhysics(not_null<QScroller*> scroller, bool ownsOvershoot);
+// Tune a QScroller to approximate macOS native momentum. QScroller only
+// provides in-range kinetics: its overshoot is always disabled - ScrollArea
+// has no overscroll at all, and ElasticScroll implements its own rubber-band
+// overscroll physics fed from the raw events.
+void SetupScrollerPhysics(not_null<QScroller*> scroller);
+
+// Resends the scroll-prepare event and, while a fling is in progress, forces
+// the momentum segment to be rebuilt from the current velocity. QScroller bakes
+// the whole trajectory (including edge clamps) at gesture end and
+// resendPrepareEvent() only shifts it, so without the rebuild a fling stops at
+// the old (shifted) edge; with it, the fling flows into content inserted
+// mid-fling. Null- and state-safe.
+void ResendScrollerPrepare(QScroller *scroller);
 
 class ScrollerStopper final : public QObject {
 public:
@@ -223,7 +231,8 @@ public:
 	// Receives wheel input on the axis this scroll doesn't handle
 	// (horizontal): without lockWheelDirection() every event where that
 	// axis dominates, with it whole gestures locked to that axis.
-	void setCrossAxisWheelProcess(Fn<bool(QPoint)> process) {
+	void setCrossAxisWheelProcess(
+			Fn<bool(QPoint, Qt::ScrollPhase)> process) {
 		_crossAxisWheelProcess = std::move(process);
 	}
 
@@ -234,16 +243,6 @@ public:
 	void lockWheelDirection() {
 		_wheelDirectionLocked = true;
 	}
-
-	// Lazily decides, at the start of scrolling in each direction, whether
-	// QScroller overscroll (bounce) is allowed for the edge we're heading
-	// toward. QScroller has no per-edge policy, but momentum only travels in
-	// the gesture direction, so switching the whole (vertical) axis policy by
-	// direction behaves per-edge. Predicates return true when that edge is a
-	// genuine boundary (fully loaded) and the bounce is wanted; a null
-	// predicate means always allowed. The applied policy is cached and only
-	// re-applied to the scroller when it actually changes.
-	void setOverscrollEdges(Fn<bool()> allowTop, Fn<bool()> allowBottom);
 
 	[[nodiscard]] rpl::producer<> scrolls() const;
 	[[nodiscard]] rpl::producer<> innerResizes() const;
@@ -278,9 +277,6 @@ private:
 	void touchUpdateSpeed();
 	void touchDeaccelerate(int32 elapsed);
 
-	void updateOverscrollByDirection(int wheelDeltaY);
-	void applyOverscrollAllowed(bool allowed);
-
 	bool _disabled = false;
 	bool _movingByScrollBar = false;
 
@@ -291,11 +287,6 @@ private:
 
 	QPointer<QScroller> _scroller;
 	QPoint _wheelPos;
-
-	Fn<bool()> _overscrollAllowTop;
-	Fn<bool()> _overscrollAllowBottom;
-	int _overscrollDirection = 0; // -1 toward top, +1 toward bottom, 0 none.
-	int _overscrollAllowedApplied = -1; // -1 unknown, 0 disabled, 1 enabled.
 
 	bool _touchEnabled = false;
 	base::Timer _touchTimer;
@@ -316,7 +307,7 @@ private:
 
 	Fn<bool(not_null<QWheelEvent*>)> _customWheelProcess;
 	Fn<bool(not_null<QTouchEvent*>)> _customTouchProcess;
-	Fn<bool(QPoint)> _crossAxisWheelProcess;
+	Fn<bool(QPoint, Qt::ScrollPhase)> _crossAxisWheelProcess;
 	ScrollDirectionLock _wheelDirectionLock;
 	bool _wheelDirectionLocked = false;
 	bool _widgetAcceptsTouch = false;

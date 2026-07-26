@@ -8,6 +8,7 @@
 
 #include "ui/text/text_bidi_algorithm.h"
 #include "styles/style_basic.h"
+#include "base/debug_log.h"
 
 // COPIED FROM qtextlayout.cpp AND MODIFIED
 namespace Ui::Text {
@@ -317,6 +318,24 @@ void WordParser::ensureWordForRightPadding() {
 
 void WordParser::maybeStartUnfinishedWord() {
 	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > _t->_minResizeWidth) {
+		// Temporary diagnostics for the mid-word wrapping issue.
+		// Fires exactly when a word switches to per-grapheme breaking.
+		static auto logged = 0;
+		if (logged < 200) {
+			++logged;
+			const auto till = _lbh.currentPosition;
+			const auto count = (till > _wordStart) ? (till - _wordStart) : 0;
+			LOG(("Wordbreak %1: minResize=%2 wordWidth=%3 "
+				"range=%4..%5 word='%6' textLen=%7 text='%8'"
+				).arg(logged
+				).arg(_t->_minResizeWidth
+				).arg(_lbh.tmpData.textWidth.toReal()
+				).arg(_wordStart
+				).arg(till
+				).arg(_tText.mid(_wordStart, count)
+				).arg(_tText.size()
+				).arg(_tText.left(48)));
+		}
 		if (_lastGraphemeBoundaryPosition >= 0) {
 			_lbh.calculateRightBearingForPreviousGlyph();
 			pushUnfinishedWord(

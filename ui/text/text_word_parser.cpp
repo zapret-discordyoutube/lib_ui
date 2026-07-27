@@ -7,11 +7,30 @@
 #include "ui/text/text_word_parser.h"
 
 #include "ui/text/text_bidi_algorithm.h"
+#include "ui/style/style_core_scale.h"
 #include "styles/style_basic.h"
 #include "base/debug_log.h"
 
 // COPIED FROM qtextlayout.cpp AND MODIFIED
 namespace Ui::Text {
+namespace {
+
+// String::_minResizeWidth answers "how narrow may this text be laid out", and
+// it doubles as "how wide must a word be before it stops breaking at word
+// boundaries and starts breaking at any character". Those are not the same
+// question, and conflating them shreds ordinary prose: call sites pass honest
+// layout minimums — 1 for a "Forwarded from" label, 27 for a channel name, 93
+// for message text — while a nine-letter Russian word already measures about
+// 100px, so nearly every word crossed the line.
+//
+// Keep a floor under the breaking threshold. Measured on real text: the widest
+// ordinary words reach ~119px, while the urls that genuinely need breaking
+// start around 196px, so this sits cleanly between them. A word wider than its
+// block can ever get now overflows instead of being cut apart, which is what
+// browsers do as well.
+constexpr auto kBreakAnywhereMinWidth = 160;
+
+} // namespace
 
 glyph_t WordParser::LineBreakHelper::currentGlyph() const {
 	Q_ASSERT(currentPosition > 0);
@@ -317,7 +336,11 @@ void WordParser::ensureWordForRightPadding() {
 }
 
 void WordParser::maybeStartUnfinishedWord() {
-	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > _t->_minResizeWidth) {
+	const auto floor = style::ConvertScale(kBreakAnywhereMinWidth);
+	const auto threshold = (_t->_minResizeWidth > floor)
+		? _t->_minResizeWidth
+		: floor;
+	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > threshold) {
 		// Temporary diagnostics for the mid-word wrapping issue.
 		// Fires exactly when a word switches to per-grapheme breaking.
 		static auto logged = 0;
@@ -325,7 +348,7 @@ void WordParser::maybeStartUnfinishedWord() {
 			++logged;
 			const auto till = _lbh.currentPosition;
 			const auto count = (till > _wordStart) ? (till - _wordStart) : 0;
-			LOG(("Wordbreak %1: minResize=%2 wordWidth=%3 "
+			LOG(("Wordbreak %1: minResize=%2 threshold=%9 wordWidth=%3 "
 				"range=%4..%5 word='%6' textLen=%7 text='%8'"
 				).arg(logged
 				).arg(_t->_minResizeWidth
@@ -334,7 +357,8 @@ void WordParser::maybeStartUnfinishedWord() {
 				).arg(till
 				).arg(_tText.mid(_wordStart, count)
 				).arg(_tText.size()
-				).arg(_tText.left(48)));
+				).arg(_tText.left(48)
+				).arg(threshold));
 		}
 		if (_lastGraphemeBoundaryPosition >= 0) {
 			_lbh.calculateRightBearingForPreviousGlyph();

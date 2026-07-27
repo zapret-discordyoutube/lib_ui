@@ -31,6 +31,7 @@ struct Capabilities {
 struct RhiCapabilities {
 	bool supported = false;
 	bool compute = false;
+	bool computeImageLoadStore = false;
 };
 
 extern const char kOptionUseQtRhi[];

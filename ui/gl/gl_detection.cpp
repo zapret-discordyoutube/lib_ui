@@ -154,13 +154,26 @@ void CrashCheckStart() {
 		return {};
 	}
 	const auto compute = rhi->isFeatureSupported(QRhi::Compute);
-	LOG(("RHI: Probe backend=%1 device=%2 compute=%3."
+
+	// D3D11 guarantees typed UAV loads only for the single-channel 32-bit
+	// formats; multi-channel float load/store is an optional feature that
+	// the backend reports as supported regardless. A compute pass reading
+	// such an image then faults inside the driver instead of failing to
+	// create, so image load/store users must stay off D3D11 entirely.
+	const auto imageLoadStore = compute
+		&& (rhi->backend() != QRhi::D3D11)
+		&& rhi->isTextureFormatSupported(
+			QRhiTexture::RGBA32F,
+			QRhiTexture::UsedWithLoadStore);
+	LOG(("RHI: Probe backend=%1 device=%2 compute=%3 imageLoadStore=%4."
 		).arg(rhi->backendName()
 		).arg(rhi->driverInfo().deviceName
-		).arg(compute ? "yes" : "no"));
+		).arg(compute ? "yes" : "no"
+		).arg(imageLoadStore ? "yes" : "no"));
 	return {
 		.supported = true,
 		.compute = compute,
+		.computeImageLoadStore = imageLoadStore,
 	};
 }
 #endif // Qt >= 6.7

@@ -359,6 +359,31 @@ void WordParser::maybeStartUnfinishedWord() {
 				).arg(_tText.size()
 				).arg(_tText.left(48)
 				).arg(threshold));
+
+			// The accumulated run sometimes spans whole phrases, spaces and
+			// all, which means the width is never reset at a word end. Say
+			// whether the spaces are there but unflagged by Qt, or flagged
+			// and simply never acted on.
+			auto real = 0;
+			auto flagged = 0;
+			for (auto i = _wordStart; i < till; ++i) {
+				if (_tText.at(i).isSpace()) {
+					++real;
+					if (_attributes[i].whiteSpace) {
+						++flagged;
+					}
+				}
+			}
+			if (real > 0) {
+				LOG(("Wordbreak %1 spaces: real=%2 flagged=%3 "
+					"item=%4..%5 wordStart=%6"
+					).arg(logged
+					).arg(real
+					).arg(flagged
+					).arg(_e.layoutData->items[_item].position
+					).arg(_itemEnd
+					).arg(_wordStart));
+			}
 		}
 		if (_lastGraphemeBoundaryPosition >= 0) {
 			_lbh.calculateRightBearingForPreviousGlyph();

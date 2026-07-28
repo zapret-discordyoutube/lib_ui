@@ -244,7 +244,10 @@ void WordParser::parse() {
 
 				if (_lbh.currentPosition >= _e.layoutData->string.length()
 					|| isSpaceBreak(_attributes, _lbh.currentPosition)
-					|| isLineBreak(_attributes, _lbh.currentPosition)) {
+					|| isLineBreak(_attributes, _lbh.currentPosition)
+					|| isLastResortSpaceBreak(
+						_attributes,
+						_lbh.currentPosition)) {
 					maybeStartUnfinishedWord();
 					_lbh.calculateRightBearing();
 					pushFinishedWord(
@@ -365,10 +368,7 @@ void WordParser::ensureWordForRightPadding() {
 }
 
 void WordParser::maybeStartUnfinishedWord() {
-	const auto floor = style::ConvertScale(kBreakAnywhereMinWidth);
-	const auto threshold = (_t->_minResizeWidth > floor)
-		? _t->_minResizeWidth
-		: floor;
+	const auto threshold = breakThreshold();
 	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > threshold) {
 		// Temporary diagnostics for the mid-word wrapping issue.
 		// Fires exactly when a word switches to per-grapheme breaking.
@@ -481,6 +481,29 @@ bool WordParser::isSpaceBreak(
 		int index) const {
 	// Don't break on &nbsp;
 	return attributes[index].whiteSpace && (_tText[index] != QChar::Nbsp);
+}
+
+int WordParser::breakThreshold() const {
+	const auto floor = style::ConvertScale(kBreakAnywhereMinWidth);
+	return (_t->_minResizeWidth > floor) ? _t->_minResizeWidth : floor;
+}
+
+bool WordParser::isLastResortSpaceBreak(
+		const QCharAttributes *attributes,
+		int index) const {
+	// A non-breaking space asks not to break, and that request is honoured
+	// for as long as the run still fits. Once the run has outgrown the
+	// narrowest the text can ever be laid out at, the choice is no longer
+	// "break here or not" — the renderer is going to break somewhere — it is
+	// "break here or in the middle of a word", and the space wins that.
+	//
+	// Text pasted from editors that turn ordinary spaces into non-breaking
+	// ones would otherwise arrive as one enormous unbreakable token and get
+	// shredded character by character.
+	return (index > 0)
+		&& (_tText[index - 1] == QChar::Nbsp)
+		&& attributes[index - 1].whiteSpace
+		&& (_lbh.tmpData.textWidth > breakThreshold());
 }
 
 } // namespace Ui::Text

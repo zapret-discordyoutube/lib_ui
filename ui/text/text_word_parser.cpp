@@ -204,6 +204,7 @@ void WordParser::parse() {
 		} else {
 			_lbh.whiteSpaceOrObject = false;
 			do {
+				const auto stepFrom = _lbh.currentPosition;
 				addNextCluster(
 					_lbh.currentPosition,
 					_itemEnd,
@@ -212,6 +213,34 @@ void WordParser::parse() {
 					current,
 					_lbh.logClusters,
 					_lbh.glyphs);
+
+				// The space checks below only look at where the step landed.
+				// If a step ever covers more than one character it can carry
+				// the parser straight over a space without it being seen, and
+				// that is the one remaining explanation for a whole phrase
+				// being accumulated as a single word. Report any long step
+				// that skipped a space.
+				if (_lbh.currentPosition > stepFrom + 1) {
+					auto skipped = -1;
+					for (auto i = stepFrom + 1; i < _lbh.currentPosition; ++i) {
+						if (isSpaceBreak(_attributes, i)) {
+							skipped = i;
+							break;
+						}
+					}
+					static auto logged = 0;
+					if (skipped >= 0 && logged < 40) {
+						++logged;
+						LOG(("Wordstep %1: %2..%3 skipped space at %4 "
+							"wordStart=%5 around='%6'"
+							).arg(logged
+							).arg(stepFrom
+							).arg(_lbh.currentPosition
+							).arg(skipped
+							).arg(_wordStart
+							).arg(_tText.mid(stepFrom, 12)));
+					}
+				}
 
 				if (_lbh.currentPosition >= _e.layoutData->string.length()
 					|| isSpaceBreak(_attributes, _lbh.currentPosition)

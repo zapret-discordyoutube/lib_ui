@@ -121,6 +121,8 @@ private:
 	bool _addingEachGrapheme = false;
 	int _lastGraphemeBoundaryPosition = -1;
 	ScriptLine _lastGraphemeBoundaryLine;
+	int _lastNbspPosition = -1;
+	ScriptLine _lastNbspLine;
 	int _item = -1;
 	int _newItem = -1;
 	int _itemEnd = 0;

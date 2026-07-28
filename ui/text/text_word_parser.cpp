@@ -242,12 +242,20 @@ void WordParser::parse() {
 					}
 				}
 
+				// Remember the last non-breaking space we walked past. It is
+				// not a break opportunity while the run still fits, but it is
+				// the place to fall back to instead of shredding the run
+				// character by character once it no longer does.
+				if ((_lbh.currentPosition > 0)
+					&& (_tText[_lbh.currentPosition - 1] == QChar::Nbsp)
+					&& _attributes[_lbh.currentPosition - 1].whiteSpace) {
+					_lastNbspPosition = _lbh.currentPosition;
+					_lastNbspLine = _lbh.tmpData;
+				}
+
 				if (_lbh.currentPosition >= _e.layoutData->string.length()
 					|| isSpaceBreak(_attributes, _lbh.currentPosition)
-					|| isLineBreak(_attributes, _lbh.currentPosition)
-					|| isLastResortSpaceBreak(
-						_attributes,
-						_lbh.currentPosition)) {
+					|| isLineBreak(_attributes, _lbh.currentPosition)) {
 					maybeStartUnfinishedWord();
 					_lbh.calculateRightBearing();
 					pushFinishedWord(
@@ -328,6 +336,8 @@ void WordParser::wordProcessed(int nextWordStart, bool spaces) {
 	_addingEachGrapheme = false;
 	_lastGraphemeBoundaryPosition = -1;
 	_lastGraphemeBoundaryLine = ScriptLine();
+	_lastNbspPosition = -1;
+	_lastNbspLine = ScriptLine();
 }
 
 void WordParser::wordContinued(int nextPartStart, bool spaces) {
@@ -369,6 +379,23 @@ void WordParser::ensureWordForRightPadding() {
 
 void WordParser::maybeStartUnfinishedWord() {
 	const auto threshold = breakThreshold();
+	if (!_addingEachGrapheme
+		&& (_lbh.tmpData.textWidth > threshold)
+		&& (_lastNbspPosition >= 0)) {
+		// The run outgrew the width but we passed a non-breaking space on the
+		// way. End the word there instead of starting to cut it apart: the
+		// space asked not to be broken, and that request only stands while
+		// the alternative is not slicing through a word.
+		pushFinishedWord(_wordStart, _lastNbspLine.textWidth, 0);
+		_lbh.tmpData.textWidth -= _lastNbspLine.textWidth;
+		_lbh.tmpData.length -= _lastNbspLine.length;
+		_wordStart = _lastNbspPosition;
+		_lastNbspPosition = -1;
+		_lastNbspLine = ScriptLine();
+		_lastGraphemeBoundaryPosition = -1;
+		_lastGraphemeBoundaryLine = ScriptLine();
+		return;
+	}
 	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > threshold) {
 		// Temporary diagnostics for the mid-word wrapping issue.
 		// Fires exactly when a word switches to per-grapheme breaking.

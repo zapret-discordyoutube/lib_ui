@@ -205,6 +205,7 @@ void WordParser::parse() {
 			_lbh.whiteSpaceOrObject = false;
 			do {
 				const auto stepFrom = _lbh.currentPosition;
+				const auto widthBefore = _lbh.tmpData.textWidth;
 				addNextCluster(
 					_lbh.currentPosition,
 					_itemEnd,
@@ -239,6 +240,26 @@ void WordParser::parse() {
 							).arg(skipped
 							).arg(_wordStart
 							).arg(_tText.mid(stepFrom, 12)));
+					}
+				}
+
+				// Temporary diagnostics for uneven spacing between words.
+				// A non-breaking space that the font has no glyph for falls
+				// back to another font and can come out a different width
+				// than an ordinary space, which is exactly what ragged gaps
+				// look like. Measure both in the same run.
+				if (_lbh.currentPosition == stepFrom + 1) {
+					const auto code = _tText.at(stepFrom).unicode();
+					if ((code == 0x20) || (code == 0xA0)) {
+						static auto logged = 0;
+						if (logged < 30) {
+							++logged;
+							LOG(("Spacewidth %1: char=%2 width=%3"
+								).arg(logged
+								).arg(int(code), 0, 16
+								).arg((_lbh.tmpData.textWidth
+									- widthBefore).toReal()));
+						}
 					}
 				}
 

@@ -395,23 +395,41 @@ void WordParser::maybeStartUnfinishedWord() {
 			// and simply never acted on.
 			auto real = 0;
 			auto flagged = 0;
+			auto breakable = 0;
+			auto blockedAt = -1;
 			for (auto i = _wordStart; i < till; ++i) {
-				if (_tText.at(i).isSpace()) {
-					++real;
-					if (_attributes[i].whiteSpace) {
-						++flagged;
-					}
+				if (!_tText.at(i).isSpace()) {
+					continue;
+				}
+				++real;
+				if (!_attributes[i].whiteSpace) {
+					continue;
+				}
+				++flagged;
+				if (isSpaceBreak(_attributes, i)) {
+					++breakable;
+				} else if (blockedAt < 0) {
+					blockedAt = i;
 				}
 			}
 			if (real > 0) {
-				LOG(("Wordbreak %1 spaces: real=%2 flagged=%3 "
-					"item=%4..%5 wordStart=%6"
+				// breakable is the number the loop actually acts on.
+				// isSpaceBreak() refuses a non-breaking space on purpose, and
+				// such a space passes both of the other two counts, so a
+				// flagged count above a breakable one says the run is held
+				// together by design rather than by a bug.
+				LOG(("Wordbreak %1 spaces: real=%2 flagged=%3 breakable=%7 "
+					"blockedChar=%8 item=%4..%5 wordStart=%6"
 					).arg(logged
 					).arg(real
 					).arg(flagged
 					).arg(_e.layoutData->items[_item].position
 					).arg(_itemEnd
-					).arg(_wordStart));
+					).arg(_wordStart
+					).arg(breakable
+					).arg((blockedAt >= 0)
+						? QString::number(_tText.at(blockedAt).unicode(), 16)
+						: QString("-")));
 			}
 		}
 		if (_lastGraphemeBoundaryPosition >= 0) {

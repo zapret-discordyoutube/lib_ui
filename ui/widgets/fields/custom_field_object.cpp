@@ -313,7 +313,7 @@ const TextWithTags &CustomFieldObject::collapsedText(int quoteId) const {
 
 Text::MarkedContext CustomFieldObject::makeFieldContext() {
 	auto context = _context;
-	context.repaint = [field = _field] { field->update(); };
+	context.repaint = [field = _field] { field->customEmojiRepaint(); };
 	return context;
 }
 

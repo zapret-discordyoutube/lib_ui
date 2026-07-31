@@ -175,14 +175,14 @@ void WordParser::parse() {
 				&& !_tWords.empty()
 				&& !_tWords.back().newline()
 				&& (_tWords.back().f_width().value() > 0);
-			if (keepWithPrevious) {
-				_tWords.back().setUnfinished(true);
-			}
 			processSingleGlyphItem(current.width);
 			_lbh.calculateRightBearing();
-			if (keepWithText && !keepWithPrevious) {
-				pushUnfinishedWord(
-					_wordStart,
+			if (keepWithPrevious) {
+				// An adjacent emoji is one visual token with the preceding text.
+				// Keeping two Word records still leaves a legal line break
+				// between them, whatever their unfinished flags say. Merge the
+				// metrics so the renderer can only move the whole run.
+				_tWords.back().appendAfterPadding(
 					_lbh.tmpData.textWidth,
 					-_lbh.negativeRightBearing());
 			} else {

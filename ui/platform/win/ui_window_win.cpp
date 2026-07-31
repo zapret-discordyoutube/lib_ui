@@ -233,32 +233,40 @@ void WindowHelper::setTitleStyle(const style::WindowTitle &st) {
 }
 
 void WindowHelper::setNativeFrame(bool enabled) {
-	if (_handle && !::Platform::IsWindows8OrGreater()) {
-		window()->windowHandle()->setFlag(Qt::FramelessWindowHint, !enabled);
-		if (!enabled) {
+	_nativeFrame = enabled;
+	_title->setVisible(!enabled);
+	applyFrameMode();
+}
+
+void WindowHelper::applyFrameMode() {
+	if (!_handle) {
+		return;
+	}
+	if (!::Platform::IsWindows8OrGreater()) {
+		window()->windowHandle()->setFlag(
+			Qt::FramelessWindowHint,
+			!_nativeFrame);
+		if (!_nativeFrame) {
 			FixAeroSnap(_handle);
 		}
 	}
-	_title->setVisible(!enabled);
-	if (_handle) {
-		updateShadow();
-		updateCornersRounding();
-		updateMargins();
-		updateWindowFrameColors();
-		fixMaximizedWindow();
-		SetWindowPos(
-			_handle,
-			0,
-			0,
-			0,
-			0,
-			0,
-			(SWP_FRAMECHANGED
-				| SWP_NOMOVE
-				| SWP_NOSIZE
-				| SWP_NOZORDER
-				| SWP_NOACTIVATE));
-	}
+	updateShadow();
+	updateCornersRounding();
+	updateMargins();
+	updateWindowFrameColors();
+	fixMaximizedWindow();
+	SetWindowPos(
+		_handle,
+		0,
+		0,
+		0,
+		0,
+		0,
+		(SWP_FRAMECHANGED
+			| SWP_NOMOVE
+			| SWP_NOSIZE
+			| SWP_NOZORDER
+			| SWP_NOACTIVATE));
 }
 
 void WindowHelper::updateShadow() {
@@ -356,22 +364,15 @@ void WindowHelper::init() {
 	window()->winIdValue() | rpl::on_next([=](WId winId) {
 		_handle = reinterpret_cast<HWND>(winId);
 
-		if (!::Platform::IsWindows8OrGreater()) {
-			const auto native = _title->isHidden();
-			window()->setWindowFlag(Qt::FramelessWindowHint, !native);
-			if (_handle && !native) {
-				FixAeroSnap(_handle);
-			}
-		}
-
 		if (_handle) {
 			_dpi = GetDpiForWindowSupported()
 				? GetDpiForWindow(_handle)
 				: 0;
-			updateWindowFrameColors();
-			updateShadow();
-			updateCornersRounding();
-			updateMargins();
+			// Qt may replace the native window while the RpWindow survives
+			// (for example when assigning its screen). A frame mode belongs to
+			// the RpWindow, so every HWND generation must receive the complete
+			// non-client transition, including SWP_FRAMECHANGED.
+			applyFrameMode();
 			if (window()->isHidden()) {
 				enableCloakingForHidden();
 			}

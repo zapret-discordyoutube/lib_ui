@@ -47,6 +47,7 @@ public:
 
 private:
 	void init();
+	void applyFrameMode();
 	void updateMargins();
 	void updateCloaking();
 	void enableCloakingForHidden();
@@ -81,6 +82,7 @@ private:
 	rpl::variable<uint> _dpi;
 	QMargins _marginsDelta;
 	HWND _handle = nullptr;
+	bool _nativeFrame = false;
 	bool _updatingMargins = false;
 	bool _isFullScreen = false;
 	bool _isMaximizedAndTranslucent = false;

@@ -41,8 +41,11 @@ public:
 	[[nodiscard]] bool unfinished() const {
 		return _unfinished != 0;
 	}
-	void setUnfinished(bool unfinished) {
-		_unfinished = unfinished ? 1 : 0;
+	void appendAfterPadding(QFixed width, QFixed rbearing) {
+		_qfixedwidth += _rpadding.value() + width.value();
+		_rpadding = 0;
+		_rbearing_modulus = std::min(std::abs(rbearing.value()), 0x7FFF);
+		_rbearing_positive = (rbearing.value() > 0) ? 1 : 0;
 	}
 
 	[[nodiscard]] uint16 position() const {

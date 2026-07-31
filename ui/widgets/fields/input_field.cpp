@@ -4107,9 +4107,62 @@ TextWithTags InputField::getTextWithTagsPart(int start, int end) const {
 }
 
 TextWithTags InputField::getTextWithAppliedMarkdown() const {
+	return getTextWithAppliedMarkdownAndSelection().text;
+}
+
+int InputField::textOffsetForDocumentPosition(int position) const {
+	auto end = QTextCursor(_inner->document());
+	end.movePosition(QTextCursor::End);
+	position = std::clamp(position, 0, end.position());
+	return (position > 0)
+		? getTextWithTagsPart(0, position).text.size()
+		: 0;
+}
+
+int InputField::documentPositionForTextOffset(int offset) const {
+	const auto textSize = int(_lastTextWithTags.text.size());
+	offset = std::clamp(offset, 0, textSize);
+	auto end = QTextCursor(_inner->document());
+	end.movePosition(QTextCursor::End);
+	const auto documentEnd = end.position();
+	if (!offset) {
+		return 0;
+	} else if (offset == textSize) {
+		return documentEnd;
+	}
+
+	// The exported offset is monotonic over document positions. Binary search
+	// gives the inverse without duplicating getTextPart() object semantics.
+	auto left = 0;
+	auto right = documentEnd;
+	while (left < right) {
+		const auto middle = left + (right - left) / 2;
+		if (textOffsetForDocumentPosition(middle) < offset) {
+			left = middle + 1;
+		} else {
+			right = middle;
+		}
+	}
+	if (textOffsetForDocumentPosition(left) == offset || !left) {
+		return left;
+	}
+	// An offset inside an object replacement has no document position. Keep
+	// it on the leading edge; valid selections always land on an exact edge.
+	return left - 1;
+}
+
+InputField::TextWithTagsAndSelection
+InputField::getTextWithAppliedMarkdownAndSelection() const {
+	const auto cursor = textCursor();
+	auto anchor = textOffsetForDocumentPosition(cursor.anchor());
+	auto position = textOffsetForDocumentPosition(cursor.position());
 	if (!_markdownEnabledState.typedTagsEnabled()
 		|| _lastMarkdownTags.empty()) {
-		return getTextWithTags();
+		return {
+			.text = getTextWithTags(),
+			.anchor = anchor,
+			.position = position,
+		};
 	}
 	const auto &originalText = _lastTextWithTags.text;
 	const auto &originalTags = _lastTextWithTags.tags;
@@ -4123,6 +4176,14 @@ TextWithTags InputField::getTextWithAppliedMarkdown() const {
 	auto result = TextWithTags();
 	result.text.reserve(originalText.size());
 	result.tags.reserve(originalTags.size() + _lastMarkdownTags.size());
+	struct AppliedRange {
+		int sourceFrom = 0;
+		int contentFrom = 0;
+		int contentTill = 0;
+		int sourceTill = 0;
+		int resultFrom = 0;
+	};
+	auto appliedRanges = std::vector<AppliedRange>();
 	auto removed = 0;
 	auto originalTag = originalTags.begin();
 	const auto originalTagsEnd = originalTags.end();
@@ -4196,10 +4257,11 @@ TextWithTags InputField::getTextWithAppliedMarkdown() const {
 			}
 		}
 
+		const auto resultFrom = int(result.text.size());
 		if (entityLength > 0) {
 			// Add tag text and entity.
 			result.tags.push_back(TextWithTags::Tag{
-				int(result.text.size()),
+				resultFrom,
 				entityLength,
 				tagId });
 			result.text.append(base::StringViewMid(
@@ -4207,13 +4269,43 @@ TextWithTags InputField::getTextWithAppliedMarkdown() const {
 				entityStart,
 				entityLength));
 		}
+		appliedRanges.push_back({
+			.sourceFrom = tag.adjustedStart,
+			.contentFrom = entityStart,
+			.contentTill = entityStart + std::max(entityLength, 0),
+			.sourceTill = tagAdjustedEnd,
+			.resultFrom = resultFrom,
+		});
 
 		from = tag.adjustedStart + tag.adjustedLength;
 		removed += (tag.adjustedLength - entityLength);
 	}
 	addOriginalTagsUpTill(originalText.size());
 	addOriginalTextUpTill(originalText.size());
-	return result;
+	const auto projectOffset = [&](int offset) {
+		offset = std::clamp(offset, 0, int(originalText.size()));
+		auto removedBefore = 0;
+		for (const auto &range : appliedRanges) {
+			if (offset < range.sourceFrom) {
+				break;
+			} else if (offset <= range.sourceTill) {
+				return range.resultFrom + std::clamp(
+					offset - range.contentFrom,
+					0,
+					range.contentTill - range.contentFrom);
+			}
+			removedBefore += (range.sourceTill - range.sourceFrom)
+				- (range.contentTill - range.contentFrom);
+		}
+		return offset - removedBefore;
+	};
+	anchor = projectOffset(anchor);
+	position = projectOffset(position);
+	return {
+		.text = std::move(result),
+		.anchor = anchor,
+		.position = position,
+	};
 }
 
 void InputField::clear() {

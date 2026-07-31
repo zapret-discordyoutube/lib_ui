@@ -43,6 +43,9 @@ struct TextParseOptions {
 	int32 maxw;
 	int32 maxh;
 	Qt::LayoutDirection dir;
+	// Independent from String::minResizeWidth(): this controls when a token
+	// is indexed by grapheme so it can be split on a genuinely narrow line.
+	int32 longWordBreakWidth = 160;
 };
 extern const TextParseOptions kDefaultTextOptions;
 extern const TextParseOptions kMarkupTextOptions;
@@ -546,6 +549,7 @@ private:
 	ExtendedWrap _extended;
 
 	int _minResizeWidth = 0;
+	int _longWordBreakWidth = 0;
 	int _maxWidth = 0;
 	int _minHeight = 0;
 	uint16 _startQuoteIndex = 0;

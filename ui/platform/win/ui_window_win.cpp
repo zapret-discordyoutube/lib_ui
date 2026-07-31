@@ -20,7 +20,6 @@
 #include "base/debug_log.h"
 #include "base/integration.h"
 #include "base/invoke_queued.h"
-#include "base/debug_log.h"
 #include "styles/palette.h"
 #include "styles/style_widgets.h"
 
@@ -234,15 +233,6 @@ void WindowHelper::setTitleStyle(const style::WindowTitle &st) {
 }
 
 void WindowHelper::setNativeFrame(bool enabled) {
-	// Temporary diagnostics for a window that keeps the platform frame while
-	// also drawing one of its own. Almost everything below is guarded on the
-	// handle, and the handle only arrives later through winIdValue(), so a
-	// call made before the window exists can do nothing but show the title.
-	LOG(("WinFrame: setNativeFrame(%1) handle=%2 titleHidden=%3"
-		).arg(enabled ? 1 : 0
-		).arg(_handle ? 1 : 0
-		).arg(_title->isHidden() ? 1 : 0));
-
 	if (_handle && !::Platform::IsWindows8OrGreater()) {
 		window()->windowHandle()->setFlag(Qt::FramelessWindowHint, !enabled);
 		if (!enabled) {
@@ -879,22 +869,6 @@ void WindowHelper::updateMargins() {
 		? QMargins(0, r.top, 0, 0)
 		: QMargins(r.left, r.top, -r.right, -r.bottom);
 
-	// The negative margins are what hides the platform frame, so report them
-	// next to the title state they are supposed to match.
-	{
-		static auto logged = 0;
-		if (logged < 20) {
-			++logged;
-			LOG(("WinFrame: margins %1 %2 %3 %4 nativeResize=%5 "
-				"titleHidden=%6"
-				).arg(margins.left()
-				).arg(margins.top()
-				).arg(margins.right()
-				).arg(margins.bottom()
-				).arg(nativeResize() ? 1 : 0
-				).arg(_title->isHidden() ? 1 : 0));
-		}
-	}
 	if (style & WS_MAXIMIZE) {
 		RECT w, m;
 		GetWindowRect(_handle , &w);

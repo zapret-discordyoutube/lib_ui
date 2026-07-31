@@ -215,6 +215,19 @@ public:
 		int start,
 		int end = -1) const;
 	[[nodiscard]] TextWithTags getTextWithAppliedMarkdown() const;
+	struct TextWithTagsAndSelection {
+		TextWithTags text;
+		int anchor = 0;
+		int position = 0;
+	};
+	[[nodiscard]] TextWithTagsAndSelection
+	getTextWithAppliedMarkdownAndSelection() const;
+
+	// QTextDocument stores each emoji/custom object as one character, while
+	// exported field text contains its full Unicode replacement. Keep that
+	// coordinate conversion owned by the field that performs the expansion.
+	[[nodiscard]] int textOffsetForDocumentPosition(int position) const;
+	[[nodiscard]] int documentPositionForTextOffset(int offset) const;
 	void insertTag(const QString &text, QString tagId = QString());
 	[[nodiscard]] bool empty() const {
 		return _lastTextWithTags.text.isEmpty();

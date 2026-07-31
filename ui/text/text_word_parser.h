@@ -103,10 +103,8 @@ private:
 	[[nodiscard]] bool isSpaceBreak(
 		const QCharAttributes *attributes,
 		int index) const;
+	[[nodiscard]] bool currentObjectIsEmoji() const;
 	[[nodiscard]] int breakThreshold() const;
-	[[nodiscard]] bool isLastResortSpaceBreak(
-		const QCharAttributes *attributes,
-		int index) const;
 
 	const not_null<String*> _t;
 	QString &_tText;

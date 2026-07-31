@@ -17,6 +17,7 @@
 #include "ui/basic_click_handlers.h"
 #include "ui/integration.h"
 #include "ui/painter.h"
+#include "ui/style/style_core_scale.h"
 #include "base/platform/base_platform_info.h"
 #include "styles/style_basic.h"
 
@@ -742,6 +743,7 @@ void String::setMarkedText(
 		const MarkedContext &context) {
 	_st = &st;
 	clear();
+	_longWordBreakWidth = style::ConvertScale(options.longWordBreakWidth);
 	{
 		// utf codes of the text display for emoji extraction
 //		auto text = textWithEntities.text;

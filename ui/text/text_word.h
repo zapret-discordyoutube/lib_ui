@@ -41,6 +41,9 @@ public:
 	[[nodiscard]] bool unfinished() const {
 		return _unfinished != 0;
 	}
+	void setUnfinished(bool unfinished) {
+		_unfinished = unfinished ? 1 : 0;
+	}
 
 	[[nodiscard]] uint16 position() const {
 		return _position;

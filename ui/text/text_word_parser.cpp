@@ -7,30 +7,12 @@
 #include "ui/text/text_word_parser.h"
 
 #include "ui/text/text_bidi_algorithm.h"
-#include "ui/style/style_core_scale.h"
 #include "styles/style_basic.h"
-#include "base/debug_log.h"
+
+#include <algorithm>
 
 // COPIED FROM qtextlayout.cpp AND MODIFIED
 namespace Ui::Text {
-namespace {
-
-// String::_minResizeWidth answers "how narrow may this text be laid out", and
-// it doubles as "how wide must a word be before it stops breaking at word
-// boundaries and starts breaking at any character". Those are not the same
-// question, and conflating them shreds ordinary prose: call sites pass honest
-// layout minimums — 1 for a "Forwarded from" label, 27 for a channel name, 93
-// for message text — while a nine-letter Russian word already measures about
-// 100px, so nearly every word crossed the line.
-//
-// Keep a floor under the breaking threshold. Measured on real text: the widest
-// ordinary words reach ~119px, while the urls that genuinely need breaking
-// start around 196px, so this sits cleanly between them. A word wider than its
-// block can ever get now overflows instead of being cut apart, which is what
-// browsers do as well.
-constexpr auto kBreakAnywhereMinWidth = 160;
-
-} // namespace
 
 glyph_t WordParser::LineBreakHelper::currentGlyph() const {
 	Q_ASSERT(currentPosition > 0);
@@ -188,12 +170,27 @@ void WordParser::parse() {
 			wordProcessed(_itemEnd);
 		} else if (current.analysis.flags == QScriptAnalysis::Object) {
 			pushAccumulatedWord();
+			const auto keepWithText = currentObjectIsEmoji();
+			const auto keepWithPrevious = keepWithText
+				&& !_tWords.empty()
+				&& !_tWords.back().newline()
+				&& (_tWords.back().f_width().value() > 0);
+			if (keepWithPrevious) {
+				_tWords.back().setUnfinished(true);
+			}
 			processSingleGlyphItem(current.width);
 			_lbh.calculateRightBearing();
-			pushFinishedWord(
-				_wordStart,
-				_lbh.tmpData.textWidth,
-				-_lbh.negativeRightBearing());
+			if (keepWithText && !keepWithPrevious) {
+				pushUnfinishedWord(
+					_wordStart,
+					_lbh.tmpData.textWidth,
+					-_lbh.negativeRightBearing());
+			} else {
+				pushFinishedWord(
+					_wordStart,
+					_lbh.tmpData.textWidth,
+					-_lbh.negativeRightBearing());
+			}
 			wordProcessed(_itemEnd);
 		} else if (atSpaceBreak) {
 			pushAccumulatedWord();
@@ -204,8 +201,6 @@ void WordParser::parse() {
 		} else {
 			_lbh.whiteSpaceOrObject = false;
 			do {
-				const auto stepFrom = _lbh.currentPosition;
-				const auto widthBefore = _lbh.tmpData.textWidth;
 				addNextCluster(
 					_lbh.currentPosition,
 					_itemEnd,
@@ -214,55 +209,6 @@ void WordParser::parse() {
 					current,
 					_lbh.logClusters,
 					_lbh.glyphs);
-
-				// The space checks below only look at where the step landed.
-				// If a step ever covers more than one character it can carry
-				// the parser straight over a space without it being seen, and
-				// that is the one remaining explanation for a whole phrase
-				// being accumulated as a single word. Report any long step
-				// that skipped a space.
-				if (_lbh.currentPosition > stepFrom + 1) {
-					auto skipped = -1;
-					for (auto i = stepFrom + 1; i < _lbh.currentPosition; ++i) {
-						if (isSpaceBreak(_attributes, i)) {
-							skipped = i;
-							break;
-						}
-					}
-					static auto logged = 0;
-					if (skipped >= 0 && logged < 40) {
-						++logged;
-						LOG(("Wordstep %1: %2..%3 skipped space at %4 "
-							"wordStart=%5 around='%6'"
-							).arg(logged
-							).arg(stepFrom
-							).arg(_lbh.currentPosition
-							).arg(skipped
-							).arg(_wordStart
-							).arg(_tText.mid(stepFrom, 12)));
-					}
-				}
-
-				// Temporary diagnostics for uneven spacing between words.
-				// A non-breaking space that the font has no glyph for falls
-				// back to another font and can come out a different width
-				// than an ordinary space, which is exactly what ragged gaps
-				// look like. Measure both in the same run.
-				if (_lbh.currentPosition == stepFrom + 1) {
-					const auto code = _tText.at(stepFrom).unicode();
-					if ((code == 0x20) || (code == 0xA0)) {
-						static auto logged = 0;
-						if (logged < 30) {
-							++logged;
-							LOG(("Spacewidth %1: char=%2 width=%3"
-								).arg(logged
-								).arg(int(code), 0, 16
-								).arg((_lbh.tmpData.textWidth
-									- widthBefore).toReal()));
-						}
-					}
-				}
-
 				// Remember the last non-breaking space we walked past. It is
 				// not a break opportunity while the run still fits, but it is
 				// the place to fall back to instead of shredding the run
@@ -418,68 +364,6 @@ void WordParser::maybeStartUnfinishedWord() {
 		return;
 	}
 	if (!_addingEachGrapheme && _lbh.tmpData.textWidth > threshold) {
-		// Temporary diagnostics for the mid-word wrapping issue.
-		// Fires exactly when a word switches to per-grapheme breaking.
-		static auto logged = 0;
-		if (logged < 200) {
-			++logged;
-			const auto till = _lbh.currentPosition;
-			const auto count = (till > _wordStart) ? (till - _wordStart) : 0;
-			LOG(("Wordbreak %1: minResize=%2 threshold=%9 wordWidth=%3 "
-				"range=%4..%5 word='%6' textLen=%7 text='%8'"
-				).arg(logged
-				).arg(_t->_minResizeWidth
-				).arg(_lbh.tmpData.textWidth.toReal()
-				).arg(_wordStart
-				).arg(till
-				).arg(_tText.mid(_wordStart, count)
-				).arg(_tText.size()
-				).arg(_tText.left(48)
-				).arg(threshold));
-
-			// The accumulated run sometimes spans whole phrases, spaces and
-			// all, which means the width is never reset at a word end. Say
-			// whether the spaces are there but unflagged by Qt, or flagged
-			// and simply never acted on.
-			auto real = 0;
-			auto flagged = 0;
-			auto breakable = 0;
-			auto blockedAt = -1;
-			for (auto i = _wordStart; i < till; ++i) {
-				if (!_tText.at(i).isSpace()) {
-					continue;
-				}
-				++real;
-				if (!_attributes[i].whiteSpace) {
-					continue;
-				}
-				++flagged;
-				if (isSpaceBreak(_attributes, i)) {
-					++breakable;
-				} else if (blockedAt < 0) {
-					blockedAt = i;
-				}
-			}
-			if (real > 0) {
-				// breakable is the number the loop actually acts on.
-				// isSpaceBreak() refuses a non-breaking space on purpose, and
-				// such a space passes both of the other two counts, so a
-				// flagged count above a breakable one says the run is held
-				// together by design rather than by a bug.
-				LOG(("Wordbreak %1 spaces: real=%2 flagged=%3 breakable=%7 "
-					"blockedChar=%8 item=%4..%5 wordStart=%6"
-					).arg(logged
-					).arg(real
-					).arg(flagged
-					).arg(_e.layoutData->items[_item].position
-					).arg(_itemEnd
-					).arg(_wordStart
-					).arg(breakable
-					).arg((blockedAt >= 0)
-						? QString::number(_tText.at(blockedAt).unicode(), 16)
-						: QString("-")));
-			}
-		}
 		if (_lastGraphemeBoundaryPosition >= 0) {
 			_lbh.calculateRightBearingForPreviousGlyph();
 			pushUnfinishedWord(
@@ -531,27 +415,24 @@ bool WordParser::isSpaceBreak(
 	return attributes[index].whiteSpace && (_tText[index] != QChar::Nbsp);
 }
 
-int WordParser::breakThreshold() const {
-	const auto floor = style::ConvertScale(kBreakAnywhereMinWidth);
-	return (_t->_minResizeWidth > floor) ? _t->_minResizeWidth : floor;
+bool WordParser::currentObjectIsEmoji() const {
+	const auto index = _engine.blockIndex(_lbh.currentPosition);
+	if (index < 0 || index >= int(_tBlocks.size())) {
+		return false;
+	}
+	const auto block = _tBlocks[index].get();
+	if (block->type() == TextBlockType::Emoji) {
+		return true;
+	} else if (block->type() != TextBlockType::CustomEmoji) {
+		return false;
+	}
+	return static_cast<const CustomEmojiBlock*>(block)
+		->custom()
+		->semantics().isEmoji;
 }
 
-bool WordParser::isLastResortSpaceBreak(
-		const QCharAttributes *attributes,
-		int index) const {
-	// A non-breaking space asks not to break, and that request is honoured
-	// for as long as the run still fits. Once the run has outgrown the
-	// narrowest the text can ever be laid out at, the choice is no longer
-	// "break here or not" — the renderer is going to break somewhere — it is
-	// "break here or in the middle of a word", and the space wins that.
-	//
-	// Text pasted from editors that turn ordinary spaces into non-breaking
-	// ones would otherwise arrive as one enormous unbreakable token and get
-	// shredded character by character.
-	return (index > 0)
-		&& (_tText[index - 1] == QChar::Nbsp)
-		&& attributes[index - 1].whiteSpace
-		&& (_lbh.tmpData.textWidth > breakThreshold());
+int WordParser::breakThreshold() const {
+	return std::max(_t->_minResizeWidth, _t->_longWordBreakWidth);
 }
 
 } // namespace Ui::Text

@@ -35,12 +35,14 @@ struct RhiCapabilities {
 };
 
 extern const char kOptionUseQtRhi[];
+extern const char kOptionEnableVulkanRhi[];
 
 [[nodiscard]] Capabilities CheckCapabilities(QWidget *widget = nullptr);
 [[nodiscard]] Backend ChooseBackendDefault(Capabilities capabilities);
 
 [[nodiscard]] bool WidgetsRhiEnabled();
 [[nodiscard]] bool WidgetsRhiSupported();
+[[nodiscard]] bool WidgetsRhiVulkan();
 [[nodiscard]] RhiCapabilities CheckRhiCapabilities();
 
 void ForceDisable(bool disable);

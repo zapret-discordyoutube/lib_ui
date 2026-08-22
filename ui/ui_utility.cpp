@@ -272,7 +272,12 @@ QPointF ScrollDeltaF(not_null<QWheelEvent*> e, bool touch) {
 			style::ConvertScaleExact(point.x()),
 			style::ConvertScaleExact(point.y()));
 	};
+#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
+	using QInputDevice::Capability::PixelScroll;
+	if (touch || e->device()->capabilities().testFlag(PixelScroll)) {
+#else // Qt >= 6.2.0
 	if (!e->pixelDelta().isNull()) {
+#endif // Qt < 6.2.0
 		return convert(e->pixelDelta())
 			* ((::Platform::IsWayland() && !touch)
 				? kMagicScrollMultiplier

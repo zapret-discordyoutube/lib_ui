@@ -263,7 +263,10 @@ private:
 
 class Object final : public Ui::Text::CustomEmoji {
 public:
-	Object(not_null<Instance*> instance, Fn<void()> repaint);
+	Object(
+		not_null<Instance*> instance,
+		Fn<void()> repaint,
+		int width);
 	~Object();
 
 	int width() override;
@@ -278,6 +281,7 @@ public:
 private:
 	const not_null<Instance*> _instance;
 	Fn<void()> _repaint;
+	const int _width = 0;
 	bool _using = false;
 
 };

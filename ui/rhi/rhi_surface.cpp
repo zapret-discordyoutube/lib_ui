@@ -21,6 +21,7 @@
 #include <QtGui/QResizeEvent>
 #include <QtCore/QCoreApplication>
 #include <qpa/qplatformbackingstore.h>
+#include <rhi/qrhi.h>
 #endif // Qt >= 6.7
 
 namespace Ui::GL {
@@ -33,6 +34,10 @@ struct SurfaceRhiTraits : RpWidgetDefaultTraits {
 };
 
 void ApplyRhiApi(QRhiWidget *widget) {
+	if (WidgetsRhiVulkan()) {
+		widget->setApi(QRhiWidget::Api::Vulkan);
+		return;
+	}
 #ifdef Q_OS_MAC
 	if (!::Platform::MetalSupported()) {
 		widget->setApi(QRhiWidget::Api::OpenGL);
@@ -84,6 +89,14 @@ SurfaceRhi::~SurfaceRhi() {
 }
 
 void SurfaceRhi::initialize(QRhiCommandBuffer *cb) {
+	if (const auto use = rhi()) {
+		[[maybe_unused]] static const auto logged = [&] {
+			LOG(("QRhi: Surface backend=%1 device=%2."
+				).arg(use->backendName()
+				).arg(use->driverInfo().deviceName));
+			return true;
+		}();
+	}
 	if (const auto r = rhiRenderer()) {
 		r->initialize(rhi(), renderTarget(), cb);
 	}

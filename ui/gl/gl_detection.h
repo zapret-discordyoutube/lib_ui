@@ -32,6 +32,7 @@ struct RhiCapabilities {
 	bool supported = false;
 	bool compute = false;
 	bool computeImageLoadStore = false;
+	bool vulkan = false;
 };
 
 extern const char kOptionUseQtRhi[];

@@ -29,7 +29,7 @@ namespace {
 base::flat_map<const IconMask*, QImage> IconMasks;
 QMutex IconMasksMutex;
 
-base::flat_map<QPair<const IconMask*, uint32>, QPixmap> iconPixmaps;
+base::flat_map<std::pair<const IconMask*, uint32>, QPixmap> iconPixmaps;
 base::flat_set<IconData*> iconData;
 
 [[nodiscard]] QImage CreateIconMask(
@@ -395,7 +395,7 @@ void MonoIcon::ensureColorizedImage(QColor color) const {
 }
 
 void MonoIcon::createCachedPixmap() const {
-	auto key = qMakePair(_mask, ColorKey(_color->c));
+	auto key = std::make_pair(_mask, ColorKey(_color->c));
 	auto j = iconPixmaps.find(key);
 	if (j == end(iconPixmaps)) {
 		auto image = colorizeImage(_maskImage, _color);
@@ -408,7 +408,9 @@ void MonoIcon::createCachedPixmap() const {
 }
 
 IconData::IconData(const IconData &other, const style::palette &palette) {
-	created();
+	// Deliberately not created(): this copy belongs to that one palette copy,
+	// which resets it itself. Registering it would put a background thread
+	// building an isolated palette into the process-wide icon registry.
 	_parts.reserve(other._parts.size());
 	for (const auto &part : other._parts) {
 		_parts.push_back(MonoIcon(part, palette));
@@ -416,11 +418,14 @@ IconData::IconData(const IconData &other, const style::palette &palette) {
 }
 
 void IconData::created() {
+	_registered = true;
 	iconData.emplace(this);
 }
 
 IconData::~IconData() {
-	iconData.remove(this);
+	if (_registered) {
+		iconData.remove(this);
+	}
 }
 
 void IconData::fill(QPainter &p, const QRect &rect) const {

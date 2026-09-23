@@ -6,7 +6,6 @@
 //
 #include "ui/text/text_word_parser.h"
 
-#include "ui/text/text_bidi_algorithm.h"
 #include "styles/style_basic.h"
 
 #include <algorithm>
@@ -14,112 +13,48 @@
 // COPIED FROM qtextlayout.cpp AND MODIFIED
 namespace Ui::Text {
 
-glyph_t WordParser::LineBreakHelper::currentGlyph() const {
-	Q_ASSERT(currentPosition > 0);
-	Q_ASSERT(logClusters[currentPosition - 1] < glyphs.numGlyphs);
-
-	return glyphs.glyphs[logClusters[currentPosition - 1]];
-}
-
 void WordParser::LineBreakHelper::saveCurrentGlyph() {
-	if (currentPosition > 0
-		&& logClusters[currentPosition - 1] < glyphs.numGlyphs) {
-		// needed to calculate right bearing later
-		previousGlyph = currentGlyph();
-		previousGlyphFontEngine = fontEngine;
-	} else {
-		previousGlyph = 0;
-		previousGlyphFontEngine = nullptr;
-	}
-}
-
-void WordParser::LineBreakHelper::calculateRightBearing(
-		QFontEngine *engine,
-		glyph_t glyph) {
-	qreal rb;
-	engine->getGlyphBearings(glyph, 0, &rb);
-
-	// We only care about negative right bearings, so we limit the range
-	// of the bearing here so that we can assume it's negative in the rest
-	// of the code, as well as use QFixed(1) as a sentinel to represent
-	// the state where we have yet to compute the right bearing.
-	rightBearing = qMin(QFixed::fromReal(rb), QFixed(0));
+	// Needed to calculate the right bearing later.
+	previousShaped = shaped;
+	previousOffset = currentPosition - itemPosition;
 }
 
 void WordParser::LineBreakHelper::calculateRightBearing() {
-	if (currentPosition > 0
-		&& logClusters[currentPosition - 1] < glyphs.numGlyphs
-		&& !whiteSpaceOrObject) {
-		calculateRightBearing(fontEngine.data(), currentGlyph());
-	} else {
-		rightBearing = 0;
-	}
+	rightBearing = whiteSpaceOrObject
+		? Fixed()
+		: shaped.rightBearingBefore(currentPosition - itemPosition);
 }
 
 void WordParser::LineBreakHelper::calculateRightBearingForPreviousGlyph() {
-	if (previousGlyph > 0) {
-		calculateRightBearing(previousGlyphFontEngine.data(), previousGlyph);
-	} else {
-		rightBearing = 0;
-	}
+	rightBearing = previousShaped
+		? previousShaped.rightBearingBefore(previousOffset)
+		: Fixed();
 }
-
-// We always calculate the right bearing right before it is needed.
-// So we don't need caching / optimizations referred to delayed right bearing calculations.
-
-//static const QFixed RightBearingNotCalculated;
-
-//inline void WordParser::LineBreakHelper::resetRightBearing()
-//{
-//	rightBearing = RightBearingNotCalculated;
-//}
 
 // We express the negative right bearing as an absolute number
 // so that it can be applied to the width using addition.
-QFixed WordParser::LineBreakHelper::negativeRightBearing() const {
-	//if (rightBearing == RightBearingNotCalculated)
-	//	return QFixed(0);
-
-	return qAbs(rightBearing);
+Fixed WordParser::LineBreakHelper::negativeRightBearing() const {
+	return abs(rightBearing);
 }
 
-void WordParser::addNextCluster(
-		int &pos,
-		int end,
-		ScriptLine &line,
-		int &glyphCount,
-		const QScriptItem &current,
-		const unsigned short *logClusters,
-		const QGlyphLayout &glyphs) {
-	int glyphPosition = logClusters[pos];
-	do { // got to the first next cluster
-		++pos;
-		++line.length;
-	} while (pos < end && logClusters[pos] == glyphPosition);
-	do { // calculate the textWidth for the rest of the current cluster.
-		if (!glyphs.attributes[glyphPosition].dontPrint)
-			line.textWidth += glyphs.advances[glyphPosition];
-		++glyphPosition;
-	} while (glyphPosition < current.num_glyphs
-		&& !glyphs.attributes[glyphPosition].clusterStart);
-
-	Q_ASSERT((pos == end && glyphPosition == current.num_glyphs)
-		|| logClusters[pos] == glyphPosition);
-
-	++glyphCount;
+void WordParser::addNextCluster(int &pos, int end, ScriptLine &line) {
+	const auto from = pos - _lbh.itemPosition;
+	const auto till = _lbh.shaped.clusterEnd(from, end - _lbh.itemPosition);
+	line.length += (till - from);
+	line.textWidth += _lbh.shaped.width(from, till);
+	pos = till + _lbh.itemPosition;
 }
 
-WordParser::BidiInitedAnalysis::BidiInitedAnalysis(not_null<String*> text)
-: list(text->_text.size()) {
-	BidiAlgorithm bidi(
-		text->_text.constData(),
-		list.data(),
-		text->_text.size(),
-		false, // baseDirectionIsRtl
-		begin(text->_blocks),
-		end(text->_blocks),
-		0); // offsetInBlocks
-	bidi.process();
+Paragraph WordParser::ResolveParagraph(not_null<const String*> t) {
+	auto result = Paragraph();
+	result.resolve(
+		t,
+		0,
+		int(t->_text.size()),
+		false, // baseRtl
+		0, // blockIndexHint
+		-1); // blockIndexLimit
+	return result;
 }
 
 WordParser::WordParser(not_null<String*> string)
@@ -127,9 +62,8 @@ WordParser::WordParser(not_null<String*> string)
 , _tText(_t->_text)
 , _tBlocks(_t->_blocks)
 , _tWords(_t->_words)
-, _analysis(_t)
-, _engine(_t, _analysis.list)
-, _e(_engine.wrapped()) {
+, _paragraph(ResolveParagraph(_t))
+, _shaper(_t, _paragraph, 0, _tText) {
 	parse();
 }
 
@@ -138,43 +72,48 @@ void WordParser::parse() {
 	if (_tText.isEmpty()) {
 		return;
 	}
-	_newItem = _e.findItem(0);
-	_attributes = _e.attributes();
-	if (!_attributes) {
+	const auto lastItem = _shaper.findItem(int(_tText.size()) - 1);
+	if (lastItem < 0) {
 		return;
 	}
-	_lbh.logClusters = _e.layoutData->logClustersPtr;
+	_shaper.shapeRange(0, lastItem);
+	_attributes = _shaper.attributes();
+	if (_attributes.empty()) {
+		return;
+	}
+	const auto &items = _shaper.items();
 
-	while (_newItem < _e.layoutData->items.size()) {
+	_newItem = 0;
+	while (_newItem < int(items.size())) {
 		if (_newItem != _item) {
-			_attributes = moveToNewItemGetAttributes();
-			if (!_attributes) {
-				return;
-			}
+			moveToNewItem();
 		}
-		const auto &current = _e.layoutData->items[_item];
+		const auto &current = items[_item];
 		const auto atSpaceBreak = [&] {
+			if (!clusterIsWhitespace(_lbh.currentPosition)) {
+				return false;
+			}
 			for (auto index = _lbh.currentPosition; index < _itemEnd; ++index) {
 				if (!_attributes[index].whiteSpace) {
 					return false;
-				} else if (isSpaceBreak(_attributes, index)) {
+				} else if (isSpaceBreak(index)) {
 					return true;
 				}
 			}
 			return false;
 		}();
-		if (current.analysis.flags == QScriptAnalysis::LineOrParagraphSeparator) {
+		if (current.newline) {
 			pushAccumulatedWord();
 			processSingleGlyphItem();
-			pushNewline(_wordStart, _engine.blockIndex(_wordStart));
+			pushNewline(_wordStart, _shaper.blockIndex(_wordStart));
 			wordProcessed(_itemEnd);
-		} else if (current.analysis.flags == QScriptAnalysis::Object) {
+		} else if (current.object) {
 			pushAccumulatedWord();
 			const auto keepWithText = currentObjectIsEmoji();
 			const auto keepWithPrevious = keepWithText
 				&& !_tWords.empty()
 				&& !_tWords.back().newline()
-				&& (_tWords.back().f_width().value() > 0);
+				&& (_tWords.back().f_width().raw() > 0);
 			processSingleGlyphItem(current.width);
 			_lbh.calculateRightBearing();
 			if (keepWithPrevious) {
@@ -204,11 +143,7 @@ void WordParser::parse() {
 				addNextCluster(
 					_lbh.currentPosition,
 					_itemEnd,
-					_lbh.tmpData,
-					_lbh.glyphCount,
-					current,
-					_lbh.logClusters,
-					_lbh.glyphs);
+					_lbh.tmpData);
 				// Remember the last non-breaking space we walked past. It is
 				// not a break opportunity while the run still fits, but it is
 				// the place to fall back to instead of shredding the run
@@ -220,9 +155,9 @@ void WordParser::parse() {
 					_lastNbspLine = _lbh.tmpData;
 				}
 
-				if (_lbh.currentPosition >= _e.layoutData->string.length()
-					|| isSpaceBreak(_attributes, _lbh.currentPosition)
-					|| isLineBreak(_attributes, _lbh.currentPosition)) {
+				if (_lbh.currentPosition >= _tText.size()
+					|| isSpaceBreak(_lbh.currentPosition)
+					|| isLineBreak(_lbh.currentPosition)) {
 					maybeStartUnfinishedWord();
 					_lbh.calculateRightBearing();
 					pushFinishedWord(
@@ -256,26 +191,13 @@ void WordParser::parse() {
 	}
 }
 
-const QCharAttributes *WordParser::moveToNewItemGetAttributes() {
+void WordParser::moveToNewItem() {
 	_item = _newItem;
-	auto &si = _e.layoutData->items[_item];
-	auto result = _e.attributes();
-	if (!si.num_glyphs) {
-		_engine.shapeGetBlock(_item);
-		result = _e.attributes();
-		if (!result) {
-			return nullptr;
-		}
-		_lbh.logClusters = _e.layoutData->logClustersPtr;
-	}
-	_lbh.currentPosition = si.position;
-	_itemEnd = si.position + _e.length(_item);
-	_lbh.glyphs = _e.shapedGlyphs(&si);
-	const auto fontEngine = _e.fontEngine(si);
-	if (_lbh.fontEngine != fontEngine) {
-		_lbh.fontEngine = fontEngine;
-	}
-	return result;
+	const auto &item = _shaper.items()[_item];
+	_lbh.shaped = _shaper.shape(_item);
+	_lbh.itemPosition = item.position;
+	_lbh.currentPosition = item.position;
+	_itemEnd = item.position + item.length;
 }
 
 void WordParser::pushAccumulatedWord() {
@@ -289,13 +211,12 @@ void WordParser::pushAccumulatedWord() {
 	}
 }
 
-void WordParser::processSingleGlyphItem(QFixed added) {
+void WordParser::processSingleGlyphItem(Fixed added) {
 	_lbh.whiteSpaceOrObject = true;
 	++_lbh.tmpData.length;
 	_lbh.tmpData.textWidth += added;
 
 	_newItem = _item + 1;
-	++_lbh.glyphCount;
 }
 
 void WordParser::wordProcessed(int nextWordStart, bool spaces) {
@@ -319,19 +240,11 @@ void WordParser::wordContinued(int nextPartStart, bool spaces) {
 }
 
 void WordParser::accumulateWhitespaces() {
-	const auto &current = _e.layoutData->items[_item];
-
 	_lbh.whiteSpaceOrObject = true;
 	while (_lbh.currentPosition < _itemEnd
-		&& _attributes[_lbh.currentPosition].whiteSpace)
-		addNextCluster(
-			_lbh.currentPosition,
-			_itemEnd,
-			_lbh.spaceData,
-			_lbh.glyphCount,
-			current,
-			_lbh.logClusters,
-			_lbh.glyphs);
+		&& _attributes[_lbh.currentPosition].whiteSpace
+		&& clusterIsWhitespace(_lbh.currentPosition))
+		addNextCluster(_lbh.currentPosition, _itemEnd, _lbh.spaceData);
 }
 
 void WordParser::ensureWordForRightPadding() {
@@ -380,16 +293,16 @@ void WordParser::maybeStartUnfinishedWord() {
 
 void WordParser::pushFinishedWord(
 		uint16 position,
-		QFixed width,
-		QFixed rbearing) {
+		Fixed width,
+		Fixed rbearing) {
 	const auto unfinished = false;
 	_tWords.push_back(Word(position, unfinished, width, rbearing));
 }
 
 void WordParser::pushUnfinishedWord(
 		uint16 position,
-		QFixed width,
-		QFixed rbearing) {
+		Fixed width,
+		Fixed rbearing) {
 	const auto unfinished = true;
 	_tWords.push_back(Word(position, unfinished, width, rbearing));
 }
@@ -398,25 +311,37 @@ void WordParser::pushNewline(uint16 position, int newlineBlockIndex) {
 	_tWords.push_back(Word(position, newlineBlockIndex));
 }
 
-bool WordParser::isLineBreak(
-		const QCharAttributes *attributes,
-		int index) const {
+bool WordParser::isLineBreak(int index) const {
 	// Don't break by '/' or '.' in the middle of the word.
 	// In case of a line break or white space it'll allow break anyway.
-	return attributes[index].lineBreak
+	return _attributes[index].lineBreak
 		&& (index <= 0
 			|| (_tText[index - 1] != '/' && _tText[index - 1] != '.'));
 }
 
-bool WordParser::isSpaceBreak(
-		const QCharAttributes *attributes,
-		int index) const {
+bool WordParser::isSpaceBreak(int index) const {
 	// Don't break on &nbsp;
-	return attributes[index].whiteSpace && (_tText[index] != QChar::Nbsp);
+	return _attributes[index].whiteSpace && (_tText[index] != QChar::Nbsp);
+}
+
+bool WordParser::clusterIsWhitespace(int index) const {
+	// A mark with no letter to sit on is shaped onto the space before it, and
+	// the two come out as one cluster, which can not be cut in half. Such a
+	// cluster carries ink of its own, so it belongs to a word and not to the
+	// padding a run of spaces makes: padding is dropped at the end of a line,
+	// and the width the text reports would be short of what it draws.
+	const auto from = index - _lbh.itemPosition;
+	const auto till = _lbh.shaped.clusterEnd(from, _itemEnd - _lbh.itemPosition);
+	for (auto i = from; i != till; ++i) {
+		if (!_attributes[i + _lbh.itemPosition].whiteSpace) {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool WordParser::currentObjectIsEmoji() const {
-	const auto index = _engine.blockIndex(_lbh.currentPosition);
+	const auto index = _shaper.blockIndex(_lbh.currentPosition);
 	if (index < 0 || index >= int(_tBlocks.size())) {
 		return false;
 	}

@@ -20,6 +20,7 @@
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
 #include <QtWidgets/QApplication>
+#include <qpa/qplatformwindow.h>
 #include <qpa/qplatformwindow_p.h>
 
 namespace Ui {
@@ -123,12 +124,14 @@ void Tooltip::popup(const QPoint &m, const QString &text, const style::Tooltip *
 			= windowHandle()->nativeInterface<QWaylandWindow>()) {
 		// Tooltip::performShow ensures our window is active
 		const auto w = not_null(QApplication::activeWindow())->pos();
+		const auto dpr = windowHandle()->devicePixelRatio()
+			/ windowHandle()->handle()->devicePixelRatio();
 		native->setParentControlGeometry(
 			QRect(
 				QPoint(
 					m.x() - w.x() + _st->shift.x(),
-					m.y() - w.y() - _st->skip),
-				QSize(-_st->shift.x() * 2, _st->shift.y() + _st->skip)));
+					m.y() - w.y() - _st->skip) * dpr,
+				QSize(-_st->shift.x() * 2, _st->shift.y() + _st->skip) * dpr));
 		// even though Qt has tooltip type, our tooltip behaves like a menu
 		// (bottom left origin, no flip_x)
 		native->setExtendedWindowType(QWaylandWindow::Menu);
@@ -147,16 +150,20 @@ void Tooltip::popup(const QPoint &m, const QString &text, const style::Tooltip *
 		// adjust tooltip position
 		const auto r = screen->availableGeometry();
 		if (r.x() + r.width() - _st->skip < p.x() + s.width() && p.x() + s.width() > m.x()) {
-			p.setX(qMax(r.x() + r.width() - int32(_st->skip) - s.width(), m.x() - s.width()));
+			p.setX(std::max(
+				r.x() + r.width() - int32(_st->skip) - s.width(),
+				m.x() - s.width()));
 		}
 		if (r.x() + _st->skip > p.x() && p.x() < m.x()) {
-			p.setX(qMin(m.x(), r.x() + int32(_st->skip)));
+			p.setX(std::min(m.x(), r.x() + int32(_st->skip)));
 		}
 		if (r.y() + r.height() - _st->skip < p.y() + s.height()) {
 			p.setY(m.y() - s.height() - _st->skip);
 		}
 		if (r.y() > p.x()) {
-			p.setY(qMin(m.y() + _st->shift.y(), r.y() + r.height() - s.height()));
+			p.setY(std::min(
+				m.y() + _st->shift.y(),
+				r.y() + r.height() - s.height()));
 		}
 	}
 
@@ -489,7 +496,7 @@ object_ptr<FlatLabel> MakeNiceTooltipLabel(
 		context);
 	const auto raw = result.data();
 	std::move(text) | rpl::on_next([=, &st] {
-		raw->resizeToWidth(qMin(maxWidth, raw->textMaxWidth()));
+		raw->resizeToWidth(std::min(maxWidth, raw->textMaxWidth()));
 		const auto desired = raw->textMaxWidth();
 		if (desired <= maxWidth) {
 			raw->resizeToWidth(desired);

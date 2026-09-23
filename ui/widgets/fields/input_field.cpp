@@ -28,19 +28,18 @@
 #include "styles/style_widgets.h"
 #include "styles/palette.h"
 
+#include <QtCore/QtMath>
 #include <QtCore/QMimeData>
 #include <QtCore/QRegularExpression>
 #include <QtGui/QClipboard>
 #include <QtGui/QTextBlock>
 #include <QtGui/QTextDocumentFragment>
+#include <QtGui/QPixmapCache>
 #include <QtGui/QRawFont>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QCommonStyle>
 #include <QtWidgets/QScrollBar>
 #include <QtWidgets/QTextEdit>
-#include <QShortcut>
-
-#include <private/qkeymapper_p.h>
 
 #include <crl/crl_async.h>
 
@@ -58,6 +57,7 @@ constexpr auto kCustomEmojiId = QTextFormat::UserProperty + 7;
 constexpr auto kQuoteFormatId = QTextFormat::UserProperty + 8;
 constexpr auto kQuoteId = QTextFormat::UserProperty + 9;
 constexpr auto kPreLanguage = QTextFormat::UserProperty + 10;
+constexpr auto kMisspelledProperty = QTextFormat::UserProperty + 11;
 constexpr auto kCollapsedQuoteFormat = QTextFormat::UserObject + 1;
 constexpr auto kCustomEmojiFormat = QTextFormat::UserObject + 2;
 
@@ -263,55 +263,6 @@ void TrimFullCoverageTags(TextWithTags &parsed) {
 		}
 	}
 	parsed.tags = TextUtilities::SimplifyTags(std::move(parsed.tags));
-}
-
-// Detects Ctrl+Shift+V (or any "Paste shortcut with extra Shift") in a way
-// that survives non-Latin keyboard layouts. QKeyEvent::matches() only looks
-// at the layout-translated key(), so on Russian etc. the V key reports as
-// Cyrillic М and stripping Shift is not enough. QKeyMapper::possibleKeys()
-// returns the Latin fallback as one of the alternatives, which is exactly
-// what QShortcutMap uses for plain Ctrl+V to keep working across layouts.
-[[nodiscard]] bool IsPasteWithShift(not_null<QKeyEvent*> e) {
-	if (!(e->modifiers() & Qt::ShiftModifier)) {
-		return false;
-	}
-	const auto bindings = QKeySequence::keyBindings(QKeySequence::Paste);
-	if (bindings.empty()) {
-		return false;
-	}
-	const auto match = [&](Qt::KeyboardModifiers mods, int key) {
-		if (!(mods & Qt::ShiftModifier)) {
-			return false;
-		}
-		const auto combined = (int(mods & ~Qt::ShiftModifier) | key)
-			& ~int(Qt::KeypadModifier | Qt::GroupSwitchModifier);
-		const auto sequence = QKeySequence(combined);
-		for (const auto &binding : bindings) {
-			if (binding == sequence) {
-				return true;
-			}
-		}
-		return false;
-	};
-	if (match(e->modifiers(), e->key())) {
-		return true;
-	}
-	const auto possible = QKeyMapper::possibleKeys(e);
-	for (const auto &p : possible) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-		if (match(p.keyboardModifiers(), int(p.key()))) {
-			return true;
-		}
-#else // Qt >= 6.7.0
-		const auto mods = Qt::KeyboardModifiers(
-			p & Qt::KeyboardModifierMask);
-		const auto key = p & ~int(Qt::KeyboardModifierMask);
-		if (match(mods, key)) {
-			return true;
-		}
-#endif // Qt < 6.7.0
-	}
-	return false;
 }
 
 [[nodiscard]] QStringView FindBlockTag(QStringView tag) {
@@ -1628,6 +1579,7 @@ const int InputField::kCustomEmojiFormat = ::Ui::kCustomEmojiFormat;
 const int InputField::kCustomEmojiId = ::Ui::kCustomEmojiId;
 const int InputField::kCustomEmojiLink = ::Ui::kCustomEmojiLink;
 const int InputField::kQuoteId = ::Ui::kQuoteId;
+const int InputField::kMisspelledProperty = ::Ui::kMisspelledProperty;
 
 class InputField::Inner final : public QTextEdit {
 public:
@@ -1690,6 +1642,91 @@ private:
 	friend class InputField;
 
 };
+
+#ifndef QT_SPELLCHECK_UNDERLINE_FROM_CHROME
+// The mark under a misspelled word, drawn the way Chrome draws it - a wave on
+// Windows and on Linux, a row of dots on macOS. Kept in the cache of pixmaps
+// as one period of it, so that a run of any length is a filled rectangle.
+[[nodiscard]] QPixmap MisspelledMarker(
+		const QColor &color,
+		qreal factor,
+		qreal descent,
+		qreal ratio) {
+	const auto key = u"ui_misspelled_%1_%2_%3_%4"_q
+		.arg(color.name(QColor::HexArgb))
+		.arg(factor)
+		.arg(descent)
+		.arg(ratio);
+	auto result = QPixmap();
+	if (QPixmapCache::find(key, &result)) {
+		return result;
+	}
+	const auto cache = gsl::finally([&] {
+		QPixmapCache::insert(key, result);
+	});
+
+	if constexpr (::Platform::IsMac()) {
+		constexpr auto kMarkerHeight = 3.;
+
+		const auto height = kMarkerHeight * factor;
+		const auto width = height + 1;
+		const auto size = QSizeF(
+			int(std::ceil(width)),
+			int(std::floor(height)));
+		result = QPixmap((size * ratio).toSize());
+		result.setDevicePixelRatio(ratio);
+		result.fill(Qt::transparent);
+		{
+			auto p = QPainter(&result);
+			p.setPen(Qt::NoPen);
+			p.setBrush(color);
+			p.setRenderHints(
+				QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+			const auto side = int(std::floor(height));
+			p.drawEllipse(0, 0, side, side);
+		}
+		return result;
+	}
+
+	constexpr auto kMarkerWidth = 4.;
+	constexpr auto kMarkerHeight = 2.;
+
+	const auto x1 = (kMarkerWidth * -3 / 8) * factor;
+	const auto y1 = (kMarkerHeight * 3 / 4) * factor;
+	const auto cY = (kMarkerHeight * 1 / 4) * factor;
+	const auto c1X1 = (kMarkerWidth * -1 / 8) * factor;
+	const auto c1X2 = (kMarkerWidth * 3 / 8) * factor;
+	const auto c1X3 = (kMarkerWidth * 7 / 8) * factor;
+	const auto c2X1 = (kMarkerWidth * 1 / 8) * factor;
+	const auto c2X2 = (kMarkerWidth * 5 / 8) * factor;
+	const auto c2X3 = (kMarkerWidth * 9 / 8) * factor;
+
+	auto path = QPainterPath();
+	path.moveTo(x1, y1);
+	path.cubicTo(c1X1, y1, c1X1, cY, c2X1, cY);
+	path.cubicTo(c1X2, cY, c1X2, y1, c2X2, y1);
+	path.cubicTo(c1X3, y1, c1X3, cY, c2X3, cY);
+
+	result = QPixmap(
+		(QSizeF(kMarkerWidth * factor, descent) * ratio).toSize());
+	result.setDevicePixelRatio(ratio);
+	result.fill(Qt::transparent);
+	{
+		auto pen = QPen(color);
+		pen.setCapStyle(Qt::RoundCap);
+		pen.setJoinStyle(Qt::RoundJoin);
+		pen.setWidthF(factor);
+
+		auto p = QPainter(&result);
+		p.setPen(pen);
+		p.setRenderHint(QPainter::Antialiasing);
+		p.translate(0, descent - (kMarkerHeight * factor));
+		p.drawPath(path);
+	}
+
+	return result;
+}
+#endif // !QT_SPELLCHECK_UNDERLINE_FROM_CHROME
 
 void InsertEmojiAtCursor(QTextCursor cursor, EmojiPtr emoji) {
 	const auto currentFormat = cursor.charFormat();
@@ -1845,7 +1882,13 @@ InputField::InputField(
 , _maxHeight(st.heightMax)
 , _inner(std::make_unique<Inner>(this))
 , _lastTextWithTags(value)
-, _placeholderFull(std::move(placeholder)) {
+, _placeholderFull(std::move(placeholder))
+, _pasteShortcut(
+	Qt::CTRL | Qt::SHIFT | Qt::Key_V,
+	_inner.get(),
+	nullptr,
+	nullptr,
+	Qt::WidgetShortcut) {
 #ifdef Q_OS_MAC
 	_systemTextReplaces = std::make_unique<SystemTextReplaces>();
 #endif
@@ -1874,7 +1917,7 @@ InputField::InputField(
 
 		if (_mode != Mode::SingleLine) {
 			const auto metrics = QFontMetricsF(_st.style.font->f);
-			const auto leading = qMax(metrics.leading(), qreal(0.0));
+			const auto leading = std::max(metrics.leading(), qreal(0.0));
 			const auto adjustment = (metrics.ascent() + leading)
 				- ((_st.style.font->height * 4) / 5);
 			_placeholderCustomFontSkip = int(base::SafeRound(-adjustment));
@@ -1964,6 +2007,12 @@ InputField::InputField(
 		&Inner::selectionChanged
 	) | rpl::on_next([] {
 		Integration::Instance().textActionsUpdated();
+	}, lifetime());
+	base::qt_signal_producer(
+		&_pasteShortcut,
+		&QShortcut::activated
+	) | rpl::on_next([=] {
+		_inner->paste();
 	}, lifetime());
 
 	setupMarkdownShortcuts();
@@ -2241,10 +2290,29 @@ void InputField::setTagMimeProcessor(Fn<QString(QStringView)> processor) {
 	_tagMimeProcessor = std::move(processor);
 }
 
+void InputField::refreshSpoilerOverlay() {
+	if (_spoilerRangesText.empty() && _spoilerRangesEmoji.empty()) {
+		_spoilerOverlay = nullptr;
+	} else if (_customObject) {
+		if (!_spoilerOverlay) {
+			_spoilerOverlay = _customObject->createSpoilerOverlay();
+			_spoilerOverlay->setGeometry(_inner->rect());
+		}
+		const auto cursor = textCursor();
+		_customObject->refreshSpoilerShown({
+			cursor.selectionStart(),
+			cursor.selectionEnd(),
+		});
+	}
+}
+
 void InputField::setCustomTextContext(
 		Text::MarkedContext context,
 		Fn<bool()> pausedEmoji,
 		Fn<bool()> pausedSpoiler) {
+	// The overlay's shown callback captures the CustomFieldObject raw, so it
+	// must not outlive the one it was created for.
+	_spoilerOverlay = nullptr;
 	_customObject = std::make_unique<CustomFieldObject>(
 		this,
 		std::move(context),
@@ -2256,6 +2324,7 @@ void InputField::setCustomTextContext(
 	_inner->document()->documentLayout()->registerHandler(
 		kCollapsedQuoteFormat,
 		_customObject.get());
+	refreshSpoilerOverlay();
 }
 
 void InputField::customEmojiRepaint() {
@@ -2270,7 +2339,99 @@ void InputField::paintEventInner(QPaintEvent *e) {
 	_customEmojiRepaintScheduled = false;
 	paintQuotes(e);
 	_inner->QTextEdit::paintEvent(e);
+#ifndef QT_SPELLCHECK_UNDERLINE_FROM_CHROME
+	paintMisspelled(e);
+#endif // !QT_SPELLCHECK_UNDERLINE_FROM_CHROME
 }
+
+#ifndef QT_SPELLCHECK_UNDERLINE_FROM_CHROME
+void InputField::paintMisspelled(QPaintEvent *e) {
+	const auto clip = e->rect();
+	const auto ratio = _inner->viewport()->devicePixelRatioF();
+	const auto document = _inner->document();
+	const auto documentLayout = document->documentLayout();
+	const auto shift = QPoint(
+		-_inner->horizontalScrollBar()->value(),
+		-_inner->verticalScrollBar()->value());
+	const auto color = st::spellUnderline->c;
+	auto p = std::optional<QPainter>();
+	for (auto block = document->begin(); block.isValid(); block = block.next()) {
+		const auto layout = block.layout();
+		if (!layout) {
+			continue;
+		}
+		const auto formats = layout->formats();
+		if (formats.isEmpty()) {
+			continue;
+		}
+		const auto blockRect = documentLayout->blockBoundingRect(block);
+		const auto fullShift = blockRect.topLeft() + shift;
+		if (fullShift.y() >= clip.y() + clip.height()) {
+			break;
+		} else if (fullShift.y() + blockRect.height() <= clip.y()) {
+			continue;
+		}
+		const auto lines = std::max(layout->lineCount(), 0);
+		for (const auto &range : formats) {
+			if (!range.format.property(kMisspelledProperty).toBool()) {
+				continue;
+			}
+			const auto pixelSize = range.format.font().pixelSize();
+			const auto factor = std::max(pixelSize, 1) / 10.;
+			for (auto i = 0; i != lines; ++i) {
+				const auto line = layout->lineAt(i);
+				const auto lineFrom = line.textStart();
+				const auto lineTill = lineFrom + line.textLength();
+				const auto from = std::max(range.start, lineFrom);
+				const auto till = std::min(range.start + range.length, lineTill);
+				if (from >= till) {
+					continue;
+				}
+				const auto top = fullShift.y() + line.y();
+				if (top + line.height() <= clip.y()) {
+					continue;
+				} else if (top >= clip.y() + clip.height()) {
+					break;
+				}
+				const auto x = line.cursorToX(from);
+				const auto width = line.cursorToX(till) - x;
+
+				// Where the glyphs of the line end, so that the mark is drawn
+				// in the space a descender would take and not over the letters.
+				const auto descent = std::max(line.descent() - 1., 1.);
+				const auto marker = MisspelledMarker(
+					color,
+					factor,
+					descent,
+					ratio);
+				const auto place = QRectF(
+					fullShift.x() + std::min(x, x + width),
+					top + line.ascent() + 1,
+					std::abs(width),
+					descent);
+				if (!p) {
+					p.emplace(_inner->viewport());
+					p->setClipRect(clip);
+				}
+				p->setBrushOrigin(place.topLeft());
+				if constexpr (!::Platform::IsMac()) {
+					p->fillRect(place, marker);
+					continue;
+				}
+				const auto side = marker.height()
+					/ marker.devicePixelRatio();
+				p->drawTiledPixmap(
+					QRectF(
+						place.x(),
+						place.y() + (descent - side) / 2.,
+						place.width(),
+						side),
+					marker);
+			}
+		}
+	}
+}
+#endif // !QT_SPELLCHECK_UNDERLINE_FROM_CHROME
 
 void InputField::paintQuotes(QPaintEvent *e) {
 	if (!_blockquoteCache || !_preCache) {
@@ -2745,8 +2906,12 @@ void InputField::paintFlatSurrounding(
 	const auto borderOpacity = _a_borderOpacity.value(_borderVisible ? 1. : 0.);
 	if (_st.borderActive && (borderOpacity > 0.)) {
 		auto borderStart = std::clamp(_borderAnimationStart, 0, width());
-		auto borderFrom = qRound(borderStart * (1. - borderShownDegree));
-		auto borderTo = borderStart + qRound((width() - borderStart) * borderShownDegree);
+		auto borderFrom
+			= int(base::SafeRound(borderStart * (1. - borderShownDegree)));
+		const auto borderRest = width() - borderStart;
+		const auto shownTo
+			= int(base::SafeRound(borderRest * borderShownDegree));
+		auto borderTo = borderStart + shownTo;
 		if (borderTo > borderFrom) {
 			auto borderFg = anim::brush(_st.borderFgActive, _st.borderFgError, errorDegree);
 			p.setOpacity(borderOpacity);
@@ -3542,7 +3707,7 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 					}
 				}
 
-				auto *ch = textStart + qMax(changedPositionInFragment, 0);
+				auto *ch = textStart + std::max(changedPositionInFragment, 0);
 				for (; ch < textEnd; ++ch) {
 					const auto removeNewline = (_mode != Mode::MultiLine)
 						&& IsNewline(*ch);
@@ -3939,19 +4104,7 @@ void InputField::handleContentsChanged() {
 			: nullptr));
 
 	//highlightMarkdown();
-	if (_spoilerRangesText.empty() && _spoilerRangesEmoji.empty()) {
-		_spoilerOverlay = nullptr;
-	} else if (_customObject) {
-		if (!_spoilerOverlay) {
-			_spoilerOverlay = _customObject->createSpoilerOverlay();
-			_spoilerOverlay->setGeometry(_inner->rect());
-		}
-		const auto cursor = textCursor();
-		_customObject->refreshSpoilerShown({
-			cursor.selectionStart(),
-			cursor.selectionEnd(),
-		});
-	}
+	refreshSpoilerOverlay();
 
 	if (tagsChanged || (_lastTextWithTags.text != currentText)) {
 		_lastTextWithTags.text = currentText;
@@ -4481,12 +4634,6 @@ void InputField::keyPressEventInner(QKeyEvent *e) {
 		e->ignore();
 	} else if (handleMarkdownKey(e)) {
 		e->accept();
-	} else if (IsPasteWithShift(e)) {
-		// Layout-independent Ctrl+Shift+V (Paste as Plain Text).
-		// insertFromMimeDataInner() looks at the live keyboard state
-		// to take the plain-text branch.
-		e->accept();
-		_inner->paste();
 	} else if (_customUpDown
 		&& (key == Qt::Key_Up
 			|| key == Qt::Key_Down

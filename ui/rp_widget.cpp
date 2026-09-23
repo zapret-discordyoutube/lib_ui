@@ -44,7 +44,11 @@ namespace {
 
 void ToggleChildrenVisibility(not_null<QWidget*> widget, bool visible) {
 	for (const auto &child : GetChildWidgets(widget)) {
-		if (child) {
+		// Children that are windows themselves, like submenu windows of a
+		// popup menu, manage their own visibility, QWidget::hideChildren()
+		// skips them as well. Toggling them here would map and unmap their
+		// surfaces in the middle of an unrelated animation.
+		if (child && !child->isWindow()) {
 			child->setVisible(visible);
 		}
 	}
@@ -270,17 +274,22 @@ bool RpWidgetWrap::handleEvent(QEvent *event) {
 		}
 		break;
 
-	case QEvent::ScreenChangeInternal:
+	case QEvent::ScreenChangeInternal: {
 		if (streams->screen.has_consumers()) {
+			const auto screen = rpWidget()->screen();
+			if (!screen) {
+				// Transiently null while the last screen is removed.
+				break;
+			}
 			if (!allAreObserved) {
 				that = rpWidget();
 			}
-			streams->screen.fire_copy(rpWidget()->screen());
+			streams->screen.fire_copy(screen);
 			if (!that) {
 				return true;
 			}
 		}
-		break;
+	} break;
 
 	case QEvent::Paint:
 		if (streams->paint.has_consumers()) {

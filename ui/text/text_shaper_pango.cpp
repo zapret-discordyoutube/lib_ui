@@ -30,12 +30,16 @@
 
 #include <QtCore/QtMath>
 #include <QtCore/QTextBoundaryFinder>
+#include <QtCore/QThread>
 #include <QtGui/QPainter>
 #include <QtGui/QPaintEngine>
 #include <QtGui/QBackingStore>
 #include <QtGui/QWindow>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
+
+#include <atomic>
+#include <mutex>
 
 namespace Ui::Text {
 namespace {
@@ -378,14 +382,37 @@ void ReorderVisually(
 	return make();
 }
 
-// Put on the context, which copies them, so nothing of ours is kept: what the
-// desktop says can be said again, and then this is how the new answer arrives.
-void ApplySystemFontOptions(PangoContext *context) {
+struct PublishedFontOptions {
+	std::mutex mutex;
+	cairo_font_options_t *options = nullptr;
+	std::atomic<int> generation = 0;
+};
+
+[[nodiscard]] PublishedFontOptions &SystemFontOptions() {
+	static auto result = PublishedFontOptions();
+	return result;
+}
+
+void PublishSystemFontOptions() {
 	const auto options = MakeSystemFontOptions();
-	pango_cairo_context_set_font_options(context, options);
-	if (options) {
-		cairo_font_options_destroy(options);
+	auto &published = SystemFontOptions();
+	auto lock = std::unique_lock(published.mutex);
+	if (published.options) {
+		cairo_font_options_destroy(published.options);
 	}
+	published.options = options;
+	++published.generation;
+}
+
+// Polled, not pushed: a crl::async thread has no event loop to push to.
+void ApplySystemFontOptions(PangoContext *context, int &applied) {
+	auto &published = SystemFontOptions();
+	if (published.generation.load() == applied) {
+		return;
+	}
+	auto lock = std::unique_lock(published.mutex);
+	pango_cairo_context_set_font_options(context, published.options);
+	applied = published.generation.load();
 }
 
 // Everything drawn from a font is drawn differently now, and none of it is
@@ -399,8 +426,47 @@ void NotifyFontOptionsChanged() {
 	}
 }
 
-// Kept for the whole library: building it lists the fonts of the system once.
-//
+void WatchSystemFontOptions() {
+	static auto lifetime = std::optional<rpl::lifetime>();
+	if (lifetime) {
+		return;
+	}
+	lifetime.emplace();
+	PublishSystemFontOptions();
+#ifdef LIB_UI_PANGO_OVER_FONTCONFIG
+	Platform::FontSettingsChanges(
+	) | rpl::on_next([] {
+		PublishSystemFontOptions();
+		NotifyFontOptionsChanged();
+	}, *lifetime);
+#endif // LIB_UI_PANGO_OVER_FONTCONFIG
+}
+
+[[nodiscard]] bool OnMainThread() {
+	const auto application = QCoreApplication::instance();
+	return application
+		&& (QThread::currentThread() == application->thread());
+}
+
+struct Ring;
+
+// WHY: Pango keeps unguarded caches in a font map and in its fonts, and text
+// is drawn off the main thread too - theme previews, font samples - so every
+// thread gets a map, a context and a ring of its own, the way Qt does it.
+struct PerThread {
+	~PerThread();
+
+	PangoFontMap *fontMap = nullptr;
+	PangoContext *context = nullptr;
+	int applied = 0;
+	std::unique_ptr<Ring> ring;
+};
+
+[[nodiscard]] PerThread &ThisThread() {
+	thread_local auto result = PerThread();
+	return result;
+}
+
 // A map of our own, not the default one of cairo: that one is shared with
 // everything else in the process, and it lists the fonts the first time it is
 // asked anything - which GTK, brought in by the platform theme of Qt, does
@@ -412,8 +478,11 @@ void NotifyFontOptionsChanged() {
 // the pixels down: it rasterizes with the settings of the system, which is the
 // whole point of not going through the font engine of Qt.
 [[nodiscard]] PangoFontMap *FontMap() {
-	static const auto result = pango_cairo_font_map_new();
-	return result;
+	auto &local = ThisThread();
+	if (!local.fontMap) {
+		local.fontMap = pango_cairo_font_map_new();
+	}
+	return local.fontMap;
 }
 
 // Nothing is said here about rounding the positions of the glyphs to whole
@@ -427,20 +496,15 @@ void NotifyFontOptionsChanged() {
 // Saying it again is all a change of them takes: Pango marks the context as
 // changed and drops the fonts it made for the old answer.
 [[nodiscard]] PangoContext *Context() {
-	static const auto result = [] {
-		const auto context = pango_font_map_create_context(FontMap());
-		ApplySystemFontOptions(context);
-#ifdef LIB_UI_PANGO_OVER_FONTCONFIG
-		static auto lifetime = rpl::lifetime();
-		Platform::FontSettingsChanges(
-		) | rpl::on_next([=] {
-			ApplySystemFontOptions(context);
-			NotifyFontOptionsChanged();
-		}, lifetime);
-#endif // LIB_UI_PANGO_OVER_FONTCONFIG
-		return context;
-	}();
-	return result;
+	auto &local = ThisThread();
+	if (!local.context) {
+		local.context = pango_font_map_create_context(FontMap());
+		if (OnMainThread()) {
+			WatchSystemFontOptions();
+		}
+	}
+	ApplySystemFontOptions(local.context, local.applied);
+	return local.context;
 }
 
 // The pattern fontconfig matched for this font, which is what cairo rasterizes
@@ -469,75 +533,56 @@ void NotifyFontOptionsChanged() {
 }
 #endif // LIB_UI_PANGO_OVER_FONTCONFIG
 
-// Whether the glyphs of this font may sit at a fraction of a pixel, and their
-// advances keep one: hinting puts a stem on the grid, and text made of glyphs
-// that were fitted to it is counted in whole pixels too. Qt keeps the fraction
-// for light hinting and for none, and takes whole pixels otherwise - both in
-// supportsHorizontalSubPixelPositions() and in shouldUseDesignMetrics(), of
-// qfontengine_ft_p.h and qfontengine_ft.cpp - and the same is answered here,
-// so that a hinted font is laid out the same by either backend.
-//
-// The question is about the font that will rasterize the glyphs, so the font
-// itself is asked, and the two answers it has are put together the way cairo
-// puts them - _cairo_ft_options_merge() in cairo-ft-font.c. One is what the
-// font was loaded with, which is everything the context of ours was given; the
-// other is the pattern fontconfig matched, read the way cairo reads it in
-// _get_pattern_ft_options(). What the font was loaded with wins, except that a
-// pattern with the hinting turned off leaves the glyphs unhinted whatever else
-// says - the one rule of the merge that goes the other way. A pattern with no
-// style in it at all is hinted in full, which is what Qt does with a pattern it
-// can not read either.
+// WHY: a glyph keeps a fraction of a pixel only where cairo hints it lightly
+// or not at all (_cairo_ft_options_merge in cairo-ft-font.c), as Qt does - and
+// never without antialiasing, where a fraction changes the shape of the glyph.
 [[nodiscard]] bool SupportsSubpixelPositions(PangoFont *font) {
 #ifdef LIB_UI_PANGO_OVER_FONTCONFIG
 	const auto pattern = FontPattern(font);
-	auto hinting = FcTrue;
-	if (pattern
-		&& FcPatternGetBool(pattern, FC_HINTING, 0, &hinting) == FcResultMatch
-		&& !hinting) {
-		return true;
-	}
-	// WHY: a glyph asked for without antialiasing is loaded for the monochrome
-	// target, and that one knows no light hinting - it fits the outline to the
-	// grid in full (_cairo_ft_options_merge of cairo-ft-font.c).
-	auto antialias = FcTrue;
-	const auto fitsForMonochrome = pattern
-		&& (FcPatternGetBool(pattern, FC_ANTIALIAS, 0, &antialias)
-			== FcResultMatch)
-		&& !antialias;
 	const auto scaled = PANGO_IS_CAIRO_FONT(font)
 		? pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font))
 		: nullptr;
+	const auto options = cairo_font_options_create();
+	const auto guard = gsl::finally([&] {
+		cairo_font_options_destroy(options);
+	});
 	if (scaled && cairo_scaled_font_status(scaled) == CAIRO_STATUS_SUCCESS) {
-		const auto options = cairo_font_options_create();
-		const auto guard = gsl::finally([&] {
-			cairo_font_options_destroy(options);
-		});
 		cairo_scaled_font_get_font_options(scaled, options);
-		const auto monochrome = fitsForMonochrome
-			|| (cairo_font_options_get_antialias(options)
-				== CAIRO_ANTIALIAS_NONE);
-		switch (cairo_font_options_get_hint_style(options)) {
-		case CAIRO_HINT_STYLE_NONE:
-			return true;
-		case CAIRO_HINT_STYLE_SLIGHT:
-			return !monochrome;
-		case CAIRO_HINT_STYLE_MEDIUM:
-		case CAIRO_HINT_STYLE_FULL:
-			return false;
-		case CAIRO_HINT_STYLE_DEFAULT:
-			break; // Nothing was said, so the pattern is what is left.
-		}
 	}
-	if (!pattern) {
+	auto antialias = FcTrue;
+	if ((pattern
+			&& FcPatternGetBool(pattern, FC_ANTIALIAS, 0, &antialias)
+				== FcResultMatch
+			&& !antialias)
+		|| (cairo_font_options_get_antialias(options)
+			== CAIRO_ANTIALIAS_NONE)) {
 		return false;
 	}
+	auto hinting = FcTrue;
 	auto style = FC_HINT_FULL;
-	if (FcPatternGetInteger(pattern, FC_HINT_STYLE, 0, &style)
-		!= FcResultMatch) {
+	if (pattern
+		&& FcPatternGetInteger(pattern, FC_HINT_STYLE, 0, &style)
+			!= FcResultMatch) {
 		style = FC_HINT_FULL;
 	}
-	return (style == FC_HINT_NONE)
-		|| ((style == FC_HINT_SLIGHT) && !fitsForMonochrome);
+	if ((style == FC_HINT_NONE)
+		|| (pattern
+			&& FcPatternGetBool(pattern, FC_HINTING, 0, &hinting)
+				== FcResultMatch
+			&& !hinting)) {
+		return true;
+	}
+	switch (cairo_font_options_get_hint_style(options)) {
+	case CAIRO_HINT_STYLE_NONE:
+	case CAIRO_HINT_STYLE_SLIGHT:
+		return true;
+	case CAIRO_HINT_STYLE_MEDIUM:
+	case CAIRO_HINT_STYLE_FULL:
+		return false;
+	case CAIRO_HINT_STYLE_DEFAULT:
+		break; // Nothing was said, so the pattern is what is left.
+	}
+	return (style == FC_HINT_SLIGHT);
 #else // LIB_UI_PANGO_OVER_FONTCONFIG
 	return false;
 #endif // !LIB_UI_PANGO_OVER_FONTCONFIG
@@ -605,6 +650,9 @@ struct FittingWidths {
 	if (!fitted || cairo_scaled_font_status(fitted) != CAIRO_STATUS_SUCCESS) {
 		return false;
 	}
+	// Cairo hands every thread the same scaled font, and these hang on it.
+	static auto mutex = std::mutex();
+	auto lock = std::unique_lock(mutex);
 	const auto widths = FittingWidthsOf(fitted);
 	if (!widths) {
 		return false;
@@ -780,7 +828,9 @@ void ShowGlyphs(
 
 	// Glyphs that go into an image of ours can not keep subpixel antialiasing:
 	// what lies under them there is not the screen - see the notes there.
-	if (!subpixelAllowed) {
+	if (!subpixelAllowed
+		&& (cairo_font_options_get_antialias(options)
+			!= CAIRO_ANTIALIAS_NONE)) {
 		cairo_font_options_set_antialias(options, CAIRO_ANTIALIAS_GRAY);
 		cairo_font_options_set_subpixel_order(
 			options,
@@ -1104,11 +1154,31 @@ struct Resolved {
 // Four of them, and for a while more than four: a paragraph that is being
 // read from cannot be written over, so when every slot is busy the ring grows
 // rather than take one away - and gives the room back as soon as it can.
-std::vector<Resolved> Kept(kKeptParagraphs);
-int KeptNext/* = 0*/;
+struct Ring {
+	std::vector<Resolved> kept = std::vector<Resolved>(kKeptParagraphs);
+	int next = 0;
+};
+
+PerThread::~PerThread() {
+	ring = nullptr;
+	if (context) {
+		g_object_unref(context);
+	}
+	if (fontMap) {
+		g_object_unref(fontMap);
+	}
+}
+
+[[nodiscard]] Ring &KeptRing() {
+	auto &local = ThisThread();
+	if (!local.ring) {
+		local.ring = std::make_unique<Ring>();
+	}
+	return *local.ring;
+}
 
 [[nodiscard]] Itemized *KeptFor(const ResolvedKey &key) {
-	for (const auto &entry : Kept) {
+	for (const auto &entry : KeptRing().kept) {
 		if (entry.itemized && entry.key == key) {
 			return entry.itemized.get();
 		}
@@ -1122,35 +1192,38 @@ int KeptNext/* = 0*/;
 [[nodiscard]] Itemized *Keep(
 		const ResolvedKey &key,
 		std::unique_ptr<Itemized> itemized) {
+	auto &kept = KeptRing().kept;
+	auto &next = KeptRing().next;
+
 	// First the room the ring took while everything was being read from,
 	// given back now that something may not be.
-	for (auto i = int(Kept.size()); i > kKeptParagraphs;) {
+	for (auto i = int(kept.size()); i > kKeptParagraphs;) {
 		--i;
-		if (!Kept[i].itemized || !Kept[i].itemized->borrowers) {
-			Kept.erase(begin(Kept) + i);
-			if (KeptNext > i) {
-				--KeptNext;
+		if (!kept[i].itemized || !kept[i].itemized->borrowers) {
+			kept.erase(begin(kept) + i);
+			if (next > i) {
+				--next;
 			}
 		}
 	}
-	if (KeptNext >= int(Kept.size())) {
-		KeptNext = 0;
+	if (next >= int(kept.size())) {
+		next = 0;
 	}
 
 	const auto result = itemized.get();
-	const auto count = int(Kept.size());
+	const auto count = int(kept.size());
 	for (auto i = 0; i != count; ++i) {
-		const auto at = (KeptNext + i) % count;
-		if (Kept[at].itemized && Kept[at].itemized->borrowers) {
+		const auto at = (next + i) % count;
+		if (kept[at].itemized && kept[at].itemized->borrowers) {
 			continue;
 		}
-		Kept[at] = { key, std::move(itemized) };
-		KeptNext = (at + 1) % count;
+		kept[at] = { key, std::move(itemized) };
+		next = (at + 1) % count;
 		return result;
 	}
 
 	// Everything is being read from, so the ring holds one more for now.
-	Kept.push_back({ key, std::move(itemized) });
+	kept.push_back({ key, std::move(itemized) });
 	return result;
 }
 

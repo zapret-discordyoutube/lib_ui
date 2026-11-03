@@ -792,7 +792,13 @@ void String::setMarkedText(
 void String::setLink(uint16 index, const ClickHandlerPtr &link) {
 	const auto extended = _extended.get();
 	if (extended && index > 0 && index <= extended->links.size()) {
-		extended->links[index - 1] = link;
+		// WHY: owners bind indexed links by id after parsing, so the id of
+		// a link the parser skipped must not replace the handler of
+		// whichever cell took that number.
+		const auto skipped = extended->skippedLinkIndices.get();
+		if (!skipped || !ranges::binary_search(*skipped, index)) {
+			extended->links[index - 1] = link;
+		}
 	}
 }
 
@@ -1398,6 +1404,12 @@ StateResult String::getState(
 		GeometryDescriptor geometry,
 		StateRequest request) const {
 	return Renderer(*this).getState(point, std::move(geometry), request);
+}
+
+std::vector<QRect> String::countHighlightRects(
+		std::span<const TextSelection> ranges,
+		const HighlightRectsRequest &request) const {
+	return Renderer(*this).highlightRects(ranges, request);
 }
 
 void String::draw(Painter &p, int32 left, int32 top, int32 w, style::align align, int32 yFrom, int32 yTo, TextSelection selection, bool fullWidthSelection) const {

@@ -13,7 +13,7 @@
 #include "base/debug_log.h"
 #include "base/platform/base_platform_info.h"
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 #include <QRhiWidget>
 #include <QBackingStore>
 #include <rhi/qrhi.h>
@@ -22,11 +22,11 @@
 #include <QtCore/QCoreApplication>
 #include <qpa/qplatformbackingstore.h>
 #include <rhi/qrhi.h>
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 
 namespace Ui::GL {
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 namespace {
 
 struct SurfaceRhiTraits : RpWidgetDefaultTraits {
@@ -89,6 +89,9 @@ SurfaceRhi::~SurfaceRhi() {
 }
 
 void SurfaceRhi::initialize(QRhiCommandBuffer *cb) {
+	if (!cb || !rhi() || rhi()->isDeviceLost() || !renderTarget()) {
+		return;
+	}
 	if (const auto use = rhi()) {
 		[[maybe_unused]] static const auto logged = [&] {
 			LOG(("QRhi: Surface backend=%1 device=%2."
@@ -103,6 +106,9 @@ void SurfaceRhi::initialize(QRhiCommandBuffer *cb) {
 }
 
 void SurfaceRhi::render(QRhiCommandBuffer *cb) {
+	if (!cb || !rhi() || rhi()->isDeviceLost() || !renderTarget()) {
+		return;
+	}
 	const auto rt = renderTarget();
 	if (!updatesEnabled() || size().isEmpty()) {
 		// The color texture is composited into the window even when the
@@ -172,23 +178,23 @@ void SurfaceRhi::releaseResources() {
 Rhi::Renderer *SurfaceRhi::rhiRenderer() const {
 	return dynamic_cast<Rhi::Renderer*>(_renderer.get());
 }
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 
 std::unique_ptr<RpWidgetWrap> CreateSurfaceRhi(
 		QWidget *parent,
 		std::unique_ptr<Renderer> renderer) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	return std::make_unique<SurfaceRhi>(
 		parent,
 		std::move(renderer));
-#else // Qt >= 6.7
+#else // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	LOG(("QRhi: Not available (Qt < 6.7), falling back to raster."));
 	return nullptr;
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 }
 
 void EnsureWindowRhi(not_null<QWidget*> window) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	if (!WidgetsRhiSupported()) {
 		return;
 	}
@@ -199,23 +205,23 @@ void EnsureWindowRhi(not_null<QWidget*> window) {
 	primer->hide();
 	LOG(("QRhi: backing store primed for window"));
 	CrashCheckFirstFrame(window);
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 }
 
 bool WindowUsesRhi(not_null<QWidget*> widget) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	const auto window = widget->window();
 	const auto handle = window->windowHandle();
 	const auto store = window->backingStore();
 	const auto platform = store ? store->handle() : nullptr;
 	return handle && platform && (platform->rhi(handle) != nullptr);
-#else // Qt >= 6.7
+#else // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	return false;
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 }
 
 void LogWindowRhi(const char *tag, not_null<QWidget*> widget) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	const auto window = widget->window();
 	const auto handle = window->windowHandle();
 	if (!handle) {
@@ -237,7 +243,7 @@ void LogWindowRhi(const char *tag, not_null<QWidget*> widget) {
 		).arg(tag
 		).arg(surface
 		).arg(WindowUsesRhi(widget) ? u"YES"_q : u"no"_q));
-#endif // Qt >= 6.7
+#endif // Qt >= 6.7 && !DESKTOP_APP_DISABLE_PRIVATE_QT_API
 }
 
 } // namespace Ui::GL

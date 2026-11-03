@@ -337,6 +337,7 @@ private:
 
 struct IconEmojiFrameCache {
 	QImage frame;
+	uint64 paletteIdentity = 0;
 	int paletteVersion = 0;
 };
 void PaintIconEmoji(

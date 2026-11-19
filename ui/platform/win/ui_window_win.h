@@ -26,6 +26,10 @@ public:
 	not_null<RpWidget*> body() override;
 	RpWidget *titleWidget() override;
 	QMargins frameMargins() override;
+	QRect fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const override;
 	int additionalContentPadding() const override;
 	rpl::producer<int> additionalContentPaddingValue() const override;
 	void setTitle(const QString &title) override;
@@ -54,11 +58,15 @@ private:
 	void updateMargins();
 	void updateCloaking();
 	void enableCloakingForHidden();
+	[[nodiscard]] std::optional<bool> cloakForPlacement();
 	void updateWindowFrameColors();
 	void updateWindowFrameColors(bool active);
 	void updateShadow();
 	void updateCornersRounding();
 	void fixMaximizedWindow();
+	void updateSizeConstraints();
+	[[nodiscard]] QRect moveNativeWindow(QRect rect);
+	[[nodiscard]] bool nativeMoveExclusive(QRect rect) const;
 	[[nodiscard]] bool filterNativeEvent(
 		UINT msg,
 		WPARAM wParam,
@@ -85,11 +93,14 @@ private:
 	std::optional<WindowShadow> _shadow;
 	rpl::variable<uint> _dpi;
 	QMargins _marginsDelta, _rcWorkDelta;
+	std::optional<int> _minimumBodyHeight;
+	std::optional<int> _maximumBodyHeight;
 	HWND _handle = nullptr;
 	bool _nativeFrame = false;
 	bool _updatingMargins = false;
 	bool _isFullScreen = false;
 	bool _isMaximizedAndTranslucent = false;
+	bool _cloakedForPlacement = false;
 
 };
 

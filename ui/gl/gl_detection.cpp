@@ -72,7 +72,11 @@ base::options::toggle OptionUseQtRhi({
 	.description = "Render the main window on the GPU instead of the CPU.",
 	.defaultValue = true,
 	.scope = [] {
+#ifndef DESKTOP_APP_DISABLE_PRIVATE_QT_API
 		return QLibraryInfo::version() >= QVersionNumber(6, 7);
+#else // !DESKTOP_APP_DISABLE_PRIVATE_QT_API
+		return false;
+#endif // DESKTOP_APP_DISABLE_PRIVATE_QT_API
 	},
 	.restartRequired = true,
 });
@@ -95,8 +99,7 @@ base::options::toggle OptionForceANGLE({
 
 [[nodiscard]] bool VulkanRhiAvailable() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0) && QT_CONFIG(vulkan) && !defined DESKTOP_APP_DISABLE_PRIVATE_QT_API
-	return !Platform::IsMac()
-		&& !Platform::IsWindows()
+	return Platform::IsWayland()
 		&& QLibraryInfo::version() >= QVersionNumber(6, 7);
 #else
 	return false;
@@ -271,7 +274,7 @@ constexpr auto kNvidiaNativeWaylandWsiSince = 545;
 	rhi.reset(QRhi::create(QRhi::D3D11, &params, flags));
 #else // Q_OS_MACOS || Q_OS_WIN
 #if QT_CONFIG(vulkan)
-	if (OptionEnableVulkanRhi.value()) {
+	if (OptionEnableVulkanRhi.relevant() && OptionEnableVulkanRhi.value()) {
 		CrashCheckStart(CrashCheckStage::Vulkan);
 		if (const auto vulkan = ProbeVulkanCapabilities(flags)) {
 			return *vulkan;

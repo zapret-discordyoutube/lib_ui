@@ -230,10 +230,12 @@ PRIVATE
     ui/widgets/icon_button_with_text.h
     ui/widgets/inner_dropdown.cpp
     ui/widgets/inner_dropdown.h
+    ui/widgets/fields/contents_change.cpp
     ui/widgets/fields/custom_field_object.cpp
     ui/widgets/fields/custom_field_object.h
     ui/widgets/fields/input_field.cpp
     ui/widgets/fields/input_field.h
+    ui/widgets/fields/input_method_commit.cpp
     ui/widgets/fields/masked_input_field.cpp
     ui/widgets/fields/masked_input_field.h
     ui/widgets/fields/number_input.cpp
